@@ -32,6 +32,10 @@ typedef struct fercuda_intercept_stats {
     uint64_t tlsf_alloc_fail;
     uint64_t tlsf_free_success;
     uint64_t tlsf_free_miss;
+    uint64_t sizeclass_alloc_success;
+    uint64_t sizeclass_alloc_fail;
+    uint64_t sizeclass_free_success;
+    uint64_t sizeclass_free_miss;
 
     uint64_t fallback_alloc_calls;
     uint64_t fallback_free_calls;

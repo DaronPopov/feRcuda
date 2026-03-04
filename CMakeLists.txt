@@ -109,6 +109,11 @@ if(TARGET fercuda_intercept)
     target_include_directories(test_intercept_compat PRIVATE include)
     target_link_libraries(test_intercept_compat PRIVATE fercuda_intercept CUDA::cudart CUDA::cuda_driver)
     add_test(NAME test_intercept_compat COMMAND test_intercept_compat)
+
+    add_executable(bench_external_alloc tests/intercept/bench_external_alloc.cu)
+    target_include_directories(bench_external_alloc PRIVATE include)
+    target_link_libraries(bench_external_alloc PRIVATE CUDA::cudart CUDA::cuda_driver dl)
+    set_target_properties(bench_external_alloc PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
 
 set(FERCUDA_GPU_HOT_INCLUDE_DIR "${FERCUDA_GPU_HOT_ROOT}/include")
@@ -147,6 +152,16 @@ add_executable(test_sched_pool_interop tests/scheduler/test_sched_pool_interop.c
 target_include_directories(test_sched_pool_interop PRIVATE include)
 target_link_libraries(test_sched_pool_interop PRIVATE fercuda)
 set_target_properties(test_sched_pool_interop PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+add_executable(test_sched_smwarp tests/scheduler/test_sched_smwarp.cu)
+target_include_directories(test_sched_smwarp PRIVATE include)
+target_link_libraries(test_sched_smwarp PRIVATE fercuda)
+set_target_properties(test_sched_smwarp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+add_executable(bench_sched_regimes tests/scheduler/bench_sched_regimes.cu)
+target_include_directories(bench_sched_regimes PRIVATE include)
+target_link_libraries(bench_sched_regimes PRIVATE fercuda)
+set_target_properties(bench_sched_regimes PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 add_executable(test_h2d_while_sched   tests/h2d/test_h2d_while_sched.cu)
 

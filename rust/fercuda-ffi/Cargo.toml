@@ -16,7 +16,9 @@ fercuda-vision-lite = { path = "../deps/fercuda-vision-lite" }
 thiserror = "2.0"
 candle-core = { version = "0.8.4", optional = true, default-features = false }
 anyhow = { version = "1", optional = true }
+cudarc = { version = "0.13", optional = true, default-features = false, features = ["driver", "cuda-version-from-build-system"] }
 
 [features]
 default = []
 candle = ["dep:candle-core", "dep:anyhow"]
+cudarc = ["dep:cudarc"]

@@ -49,6 +49,11 @@ struct WorkItem {
     uint64_t args[SCHED_MAX_ARGS];
 };
 
+enum class ExecRegime : uint8_t {
+    SINGLE_CTA = 0,
+    SMWARP = 1,
+};
+
 // ─── Shared State (lives in device memory) ────────────────────────────────────
 
 struct SchedState {
@@ -60,10 +65,14 @@ struct SchedState {
     // Control
     volatile bool running;
     volatile bool shutdown_req;
+    volatile uint32_t regime;
+    volatile uint32_t launch_blocks;
+    volatile uint32_t resident_blocks;
 
     // Counters — volatile so kernel writes bypass L1 and are visible to host DMA
     volatile uint64_t ops_completed;
     volatile uint64_t cycles_idle;
+    volatile uint64_t warp_dispatches;
 };
 
 // ─── Host-side Handle ─────────────────────────────────────────────────────────
@@ -78,7 +87,7 @@ public:
                     uint64_t* args, int nargs);
 
     // Launch persistent kernel (call once)
-    void launch(int threads = 128);
+    void launch(int threads = 128, ExecRegime regime = ExecRegime::SINGLE_CTA);
 
     // Block until all submitted work is done
     void sync();
@@ -88,6 +97,9 @@ public:
 
     // Read counters
     uint64_t ops_completed() const;
+    uint64_t warp_dispatches() const;
+    uint32_t resident_blocks() const;
+    uint32_t launch_blocks() const;
 
     SchedState* device_state() const { return dstate_; }
 

@@ -3,6 +3,7 @@
 
 #include <dlfcn.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -61,6 +62,12 @@ using cuda_get_device_fn = cudaError_t (*)(int* device);
 
 enum class Owner : uint8_t {
     TLSF = 1,
+    SizeClass = 2,
+};
+
+enum class RegimeKind : uint8_t {
+    TLSF = 1,
+    SizeClass = 2,
 };
 
 enum class ApiKind : uint8_t {
@@ -78,13 +85,21 @@ struct AllocationMeta {
 };
 
 struct State {
+    static constexpr size_t kSizeClassMin = 256;
+    static constexpr size_t kSizeClassMax = 1u << 24; // 16 MiB
+    static constexpr size_t kSizeClassCount = 17;     // 256B..16MiB
+
     std::once_flag init_once;
     std::mutex owner_mu;
     std::unordered_map<void*, AllocationMeta> owners;
+    std::mutex sizeclass_mu;
+    std::unordered_map<void*, size_t> sizeclass_alloc_sizes;
+    std::array<std::vector<void*>, kSizeClassCount> sizeclass_free_lists;
 
     bool enabled = true;
     bool log = false;
     bool async_tlsf = false;
+    RegimeKind regime = RegimeKind::TLSF;
     bool initialized = false;
 
     void* gpu_hot_handle = nullptr;
@@ -152,6 +167,10 @@ struct Telemetry {
     std::atomic<uint64_t> tlsf_alloc_fail{0};
     std::atomic<uint64_t> tlsf_free_success{0};
     std::atomic<uint64_t> tlsf_free_miss{0};
+    std::atomic<uint64_t> sizeclass_alloc_success{0};
+    std::atomic<uint64_t> sizeclass_alloc_fail{0};
+    std::atomic<uint64_t> sizeclass_free_success{0};
+    std::atomic<uint64_t> sizeclass_free_miss{0};
 
     std::atomic<uint64_t> fallback_alloc_calls{0};
     std::atomic<uint64_t> fallback_free_calls{0};
@@ -164,6 +183,8 @@ Telemetry& telemetry() {
     static Telemetry t{};
     return t;
 }
+
+bool can_use_sizeclass_for_sync_alloc();
 
 thread_local bool g_in_hook = false;
 
@@ -189,6 +210,17 @@ uint64_t env_u64(const char* key, uint64_t def) {
     unsigned long long parsed = std::strtoull(v, &end, 10);
     if (!end || *end != '\0') return def;
     return static_cast<uint64_t>(parsed);
+}
+
+RegimeKind env_regime_kind() {
+    const char* v = std::getenv("FERCUDA_INTERCEPT_REGIME");
+    if (!v || v[0] == '\0') return RegimeKind::TLSF;
+    if (std::strcmp(v, "sizeclass") == 0 || std::strcmp(v, "SIZECLASS") == 0 ||
+        std::strcmp(v, "regime2") == 0 || std::strcmp(v, "REGIME2") == 0 ||
+        std::strcmp(v, "segv2") == 0 || std::strcmp(v, "SEGV2") == 0) {
+        return RegimeKind::SizeClass;
+    }
+    return RegimeKind::TLSF;
 }
 
 void log_line(const State& s, const std::string& msg) {
@@ -341,7 +373,9 @@ void initialize() {
         t.init_calls.fetch_add(1, std::memory_order_relaxed);
         s.enabled = env_enabled("FERCUDA_INTERCEPT_ENABLE", true);
         s.log = env_enabled("FERCUDA_INTERCEPT_LOG", false);
-        s.async_tlsf = env_enabled("FERCUDA_INTERCEPT_ASYNC_TLSF", false);
+        s.async_tlsf = env_enabled("FERCUDA_INTERCEPT_ASYNC_REGIME",
+            env_enabled("FERCUDA_INTERCEPT_ASYNC_TLSF", false));
+        s.regime = env_regime_kind();
         s.strict_mode = env_is_strict_mode();
         resolve_real_cuda_symbols(s);
         resolve_gpu_hot_symbols(s);
@@ -352,47 +386,51 @@ void initialize() {
             g_in_hook = false;
             return;
         }
-        if (!s.gpu_hot_init || !s.gpu_hot_alloc || !s.gpu_hot_free) {
-            if (!s.strict_mode) s.enabled = false;
-            t.init_fail.fetch_add(1, std::memory_order_relaxed);
-            s.initialized = true;
-            g_in_hook = false;
-            return;
-        }
-
-        int device = 0;
-        if (s.real_cuda_get_device && s.real_cuda_get_device(&device) != cudaSuccess) device = 0;
-        if (s.gpu_hot_init_with_config && s.gpu_hot_default_config) {
-            GPUHotConfig cfg = s.gpu_hot_default_config();
-            const uint64_t pool_mb = env_u64("FERCUDA_INTERCEPT_POOL_MB", 128);
-            const uint64_t reserve_mb = env_u64("FERCUDA_INTERCEPT_RESERVE_MB", 64);
-            const size_t pool_bytes = static_cast<size_t>(pool_mb) << 20;
-            const size_t reserve_bytes = static_cast<size_t>(reserve_mb) << 20;
-            cfg.pool_fraction = 0.0f;
-            cfg.fixed_pool_size = pool_bytes;
-            cfg.min_pool_size = pool_bytes;
-            cfg.max_pool_size = pool_bytes;
-            cfg.reserve_vram = reserve_bytes;
-            cfg.quiet_init = true;
-            s.gpu_hot_runtime = s.gpu_hot_init_with_config(device, nullptr, &cfg);
-        } else {
-            s.gpu_hot_runtime = s.gpu_hot_init(device, nullptr);
-        }
-        if (!s.gpu_hot_runtime) {
-            if (!s.strict_mode) s.enabled = false;
-        } else {
-            if (s.gpu_hot_runtime_validate && !s.gpu_hot_runtime_validate(s.gpu_hot_runtime)) {
+        if (s.regime == RegimeKind::TLSF) {
+            if (!s.gpu_hot_init || !s.gpu_hot_alloc || !s.gpu_hot_free) {
                 if (!s.strict_mode) s.enabled = false;
+                t.init_fail.fetch_add(1, std::memory_order_relaxed);
+                s.initialized = true;
+                g_in_hook = false;
+                return;
             }
-            // Health probe: ensure allocator path is functional before enabling interception.
-            if (s.enabled) {
-                void* probe = s.gpu_hot_alloc(s.gpu_hot_runtime, 4096);
-                if (!probe) {
+
+            int device = 0;
+            if (s.real_cuda_get_device && s.real_cuda_get_device(&device) != cudaSuccess) device = 0;
+            if (s.gpu_hot_init_with_config && s.gpu_hot_default_config) {
+                GPUHotConfig cfg = s.gpu_hot_default_config();
+                const uint64_t pool_mb = env_u64("FERCUDA_INTERCEPT_POOL_MB", 128);
+                const uint64_t reserve_mb = env_u64("FERCUDA_INTERCEPT_RESERVE_MB", 64);
+                const size_t pool_bytes = static_cast<size_t>(pool_mb) << 20;
+                const size_t reserve_bytes = static_cast<size_t>(reserve_mb) << 20;
+                cfg.pool_fraction = 0.0f;
+                cfg.fixed_pool_size = pool_bytes;
+                cfg.min_pool_size = pool_bytes;
+                cfg.max_pool_size = pool_bytes;
+                cfg.reserve_vram = reserve_bytes;
+                cfg.quiet_init = true;
+                s.gpu_hot_runtime = s.gpu_hot_init_with_config(device, nullptr, &cfg);
+            } else {
+                s.gpu_hot_runtime = s.gpu_hot_init(device, nullptr);
+            }
+            if (!s.gpu_hot_runtime) {
+                if (!s.strict_mode) s.enabled = false;
+            } else {
+                if (s.gpu_hot_runtime_validate && !s.gpu_hot_runtime_validate(s.gpu_hot_runtime)) {
                     s.enabled = false;
-                } else {
-                    s.gpu_hot_free(s.gpu_hot_runtime, probe);
+                }
+                // Health probe: ensure allocator path is functional before enabling interception.
+                if (s.enabled) {
+                    void* probe = s.gpu_hot_alloc(s.gpu_hot_runtime, 4096);
+                    if (!probe) {
+                        s.enabled = false;
+                    } else {
+                        s.gpu_hot_free(s.gpu_hot_runtime, probe);
+                    }
                 }
             }
+        } else if (!can_use_sizeclass_for_sync_alloc()) {
+            if (!s.strict_mode) s.enabled = false;
         }
         if (s.enabled) t.init_success.fetch_add(1, std::memory_order_relaxed);
         else t.init_fail.fetch_add(1, std::memory_order_relaxed);
@@ -408,28 +446,125 @@ void try_recover_symbols() {
     resolve_real_cuda_symbols(s);
 }
 
-void remember_tlsf_ptr(void* p, uint64_t bytes, ApiKind api) {
+void remember_owned_ptr(void* p, Owner owner, uint64_t bytes, ApiKind api) {
     if (!p) return;
     State& s = state();
     std::lock_guard<std::mutex> lk(s.owner_mu);
-    s.owners[p] = AllocationMeta{Owner::TLSF, api, bytes};
+    s.owners[p] = AllocationMeta{owner, api, bytes};
 }
 
-bool erase_if_tlsf(void* p, AllocationMeta* out_meta = nullptr) {
+bool erase_if_owned(void* p, Owner owner, AllocationMeta* out_meta = nullptr) {
     State& s = state();
     std::lock_guard<std::mutex> lk(s.owner_mu);
     auto it = s.owners.find(p);
     if (it == s.owners.end()) return false;
     if (out_meta) *out_meta = it->second;
-    bool tlsf = (it->second.owner == Owner::TLSF);
+    bool owned = (it->second.owner == owner);
     s.owners.erase(it);
-    return tlsf;
+    return owned;
 }
 
 uint64_t tracked_alloc_count() {
     State& s = state();
     std::lock_guard<std::mutex> lk(s.owner_mu);
     return static_cast<uint64_t>(s.owners.size());
+}
+
+size_t sizeclass_class_index_from_size(size_t bytes) {
+    size_t clamped = bytes < State::kSizeClassMin ? State::kSizeClassMin : bytes;
+    size_t bucket = State::kSizeClassMin;
+    size_t idx = 0;
+    while (bucket < clamped && idx + 1 < State::kSizeClassCount) {
+        bucket <<= 1;
+        ++idx;
+    }
+    return idx;
+}
+
+size_t sizeclass_class_size(size_t bytes) {
+    size_t idx = sizeclass_class_index_from_size(bytes);
+    return State::kSizeClassMin << idx;
+}
+
+bool sizeclass_is_large_alloc(size_t bytes) {
+    return bytes > State::kSizeClassMax;
+}
+
+void* sizeclass_backend_alloc(State& s, size_t bytes) {
+    if (!s.real_cuda_malloc && !s.real_cu_mem_alloc_v2 && !s.real_cu_mem_alloc && !s.real_cuda_malloc_async) {
+        try_recover_symbols();
+    }
+    if (s.real_cuda_malloc) {
+        void* ptr = nullptr;
+        if (s.real_cuda_malloc(&ptr, bytes) == cudaSuccess) return ptr;
+    }
+    if (s.real_cu_mem_alloc_v2) {
+        CUdeviceptr dptr = 0;
+        if (s.real_cu_mem_alloc_v2(&dptr, bytes) == CUDA_SUCCESS) return reinterpret_cast<void*>(dptr);
+    }
+    if (s.real_cu_mem_alloc) {
+        CUdeviceptr dptr = 0;
+        if (s.real_cu_mem_alloc(&dptr, bytes) == CUDA_SUCCESS) return reinterpret_cast<void*>(dptr);
+    }
+    return nullptr;
+}
+
+void sizeclass_backend_free(State& s, void* ptr) {
+    if (!s.real_cuda_free && !s.real_cu_mem_free_v2 && !s.real_cu_mem_free && !s.real_cuda_free_async) {
+        try_recover_symbols();
+    }
+    if (s.real_cuda_free && s.real_cuda_free(ptr) == cudaSuccess) return;
+    CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(ptr);
+    if (s.real_cu_mem_free_v2 && s.real_cu_mem_free_v2(dptr) == CUDA_SUCCESS) return;
+    if (s.real_cu_mem_free) (void)s.real_cu_mem_free(dptr);
+}
+
+void* sizeclass_alloc(State& s, size_t req_bytes) {
+    const size_t rounded = sizeclass_is_large_alloc(req_bytes) ? req_bytes : sizeclass_class_size(req_bytes);
+    if (!sizeclass_is_large_alloc(req_bytes)) {
+        const size_t idx = sizeclass_class_index_from_size(req_bytes);
+        std::lock_guard<std::mutex> lk(s.sizeclass_mu);
+        auto& free_list = s.sizeclass_free_lists[idx];
+        if (!free_list.empty()) {
+            void* p = free_list.back();
+            free_list.pop_back();
+            s.sizeclass_alloc_sizes[p] = rounded;
+            return p;
+        }
+    }
+
+    void* p = sizeclass_backend_alloc(s, rounded);
+    if (!p) return nullptr;
+    std::lock_guard<std::mutex> lk(s.sizeclass_mu);
+    s.sizeclass_alloc_sizes[p] = rounded;
+    return p;
+}
+
+bool sizeclass_free(State& s, void* ptr) {
+    size_t alloc_size = 0;
+    {
+        std::lock_guard<std::mutex> lk(s.sizeclass_mu);
+        auto it = s.sizeclass_alloc_sizes.find(ptr);
+        if (it == s.sizeclass_alloc_sizes.end()) return false;
+        alloc_size = it->second;
+        s.sizeclass_alloc_sizes.erase(it);
+    }
+
+    if (sizeclass_is_large_alloc(alloc_size)) {
+        sizeclass_backend_free(s, ptr);
+        return true;
+    }
+
+    const size_t idx = sizeclass_class_index_from_size(alloc_size);
+    std::lock_guard<std::mutex> lk(s.sizeclass_mu);
+    s.sizeclass_free_lists[idx].push_back(ptr);
+    return true;
+}
+
+void sizeclass_shutdown(State& s) {
+    std::lock_guard<std::mutex> lk(s.sizeclass_mu);
+    s.sizeclass_alloc_sizes.clear();
+    for (auto& list : s.sizeclass_free_lists) list.clear();
 }
 
 bool can_use_tlsf_for_sync_alloc() {
@@ -444,11 +579,74 @@ bool can_use_tlsf_for_sync_alloc() {
     return true;
 }
 
+bool can_use_sizeclass_for_sync_alloc() {
+    State& s = state();
+    if (!s.enabled) return false;
+    if (!s.real_cuda_malloc && !s.real_cu_mem_alloc_v2 && !s.real_cu_mem_alloc) {
+        try_recover_symbols();
+    }
+    return s.real_cuda_malloc || s.real_cu_mem_alloc_v2 || s.real_cu_mem_alloc;
+}
+
+bool can_use_active_regime_for_sync_alloc() {
+    State& s = state();
+    if (s.regime == RegimeKind::SizeClass) return can_use_sizeclass_for_sync_alloc();
+    return can_use_tlsf_for_sync_alloc();
+}
+
+Owner active_owner(const State& s) {
+    return s.regime == RegimeKind::SizeClass ? Owner::SizeClass : Owner::TLSF;
+}
+
+bool active_regime_alloc(State& s, void** out_ptr, size_t bytes) {
+    if (!out_ptr) return false;
+    if (s.regime == RegimeKind::SizeClass) {
+        *out_ptr = sizeclass_alloc(s, bytes);
+        return *out_ptr != nullptr;
+    }
+    *out_ptr = s.gpu_hot_alloc(s.gpu_hot_runtime, bytes);
+    return *out_ptr != nullptr;
+}
+
+bool active_regime_free(State& s, void* ptr) {
+    if (s.regime == RegimeKind::SizeClass) return sizeclass_free(s, ptr);
+    s.gpu_hot_free(s.gpu_hot_runtime, ptr);
+    return true;
+}
+
+void telemetry_alloc_success() {
+    Telemetry& t = telemetry();
+    State& s = state();
+    if (s.regime == RegimeKind::SizeClass) t.sizeclass_alloc_success.fetch_add(1, std::memory_order_relaxed);
+    else t.tlsf_alloc_success.fetch_add(1, std::memory_order_relaxed);
+}
+
+void telemetry_alloc_fail() {
+    Telemetry& t = telemetry();
+    State& s = state();
+    if (s.regime == RegimeKind::SizeClass) t.sizeclass_alloc_fail.fetch_add(1, std::memory_order_relaxed);
+    else t.tlsf_alloc_fail.fetch_add(1, std::memory_order_relaxed);
+}
+
+void telemetry_free_success() {
+    Telemetry& t = telemetry();
+    State& s = state();
+    if (s.regime == RegimeKind::SizeClass) t.sizeclass_free_success.fetch_add(1, std::memory_order_relaxed);
+    else t.tlsf_free_success.fetch_add(1, std::memory_order_relaxed);
+}
+
+void telemetry_free_miss() {
+    Telemetry& t = telemetry();
+    State& s = state();
+    if (s.regime == RegimeKind::SizeClass) t.sizeclass_free_miss.fetch_add(1, std::memory_order_relaxed);
+    else t.tlsf_free_miss.fetch_add(1, std::memory_order_relaxed);
+}
+
 bool should_strict_reject() {
     State& s = state();
     Telemetry& t = telemetry();
     if (!s.strict_mode) return false;
-    if (can_use_tlsf_for_sync_alloc()) return false;
+    if (can_use_active_regime_for_sync_alloc()) return false;
     t.strict_mode_reject_calls.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -498,22 +696,23 @@ extern "C" CUresult cuMemAlloc_v2(CUdeviceptr* dptr, size_t bytesize) {
     t.alloc_bytes_requested.fetch_add(static_cast<uint64_t>(bytesize), std::memory_order_relaxed);
     if (!dptr) return CUDA_ERROR_INVALID_VALUE;
     if (should_strict_reject()) return CUDA_ERROR_NOT_SUPPORTED;
-    if (g_in_hook || !can_use_tlsf_for_sync_alloc()) {
+    if (g_in_hook || !can_use_active_regime_for_sync_alloc()) {
         t.fallback_alloc_calls.fetch_add(1, std::memory_order_relaxed);
         if (!s.real_cu_mem_alloc_v2 && !s.real_cu_mem_alloc) try_recover_symbols();
         return s.real_cu_mem_alloc_v2 ? s.real_cu_mem_alloc_v2(dptr, bytesize) : CUDA_ERROR_NOT_INITIALIZED;
     }
 
     g_in_hook = true;
-    void* p = s.gpu_hot_alloc(s.gpu_hot_runtime, bytesize);
+    void* p = nullptr;
+    const bool ok = active_regime_alloc(s, &p, bytesize);
     g_in_hook = false;
-    if (p) {
+    if (ok) {
         *dptr = reinterpret_cast<CUdeviceptr>(p);
-        remember_tlsf_ptr(p, static_cast<uint64_t>(bytesize), ApiKind::DriverSync);
-        t.tlsf_alloc_success.fetch_add(1, std::memory_order_relaxed);
+        remember_owned_ptr(p, active_owner(s), static_cast<uint64_t>(bytesize), ApiKind::DriverSync);
+        telemetry_alloc_success();
         return CUDA_SUCCESS;
     }
-    t.tlsf_alloc_fail.fetch_add(1, std::memory_order_relaxed);
+    telemetry_alloc_fail();
     t.fallback_alloc_calls.fetch_add(1, std::memory_order_relaxed);
     if (!s.real_cu_mem_alloc_v2 && !s.real_cu_mem_alloc) try_recover_symbols();
     if (s.real_cu_mem_alloc_v2) return s.real_cu_mem_alloc_v2(dptr, bytesize);
@@ -531,14 +730,14 @@ extern "C" CUresult cuMemFree_v2(CUdeviceptr dptr) {
     if (g_in_hook) return s.real_cu_mem_free_v2 ? s.real_cu_mem_free_v2(dptr) : CUDA_ERROR_NOT_INITIALIZED;
 
     if (should_strict_reject()) return CUDA_ERROR_NOT_SUPPORTED;
-    if (erase_if_tlsf(p) && can_use_tlsf_for_sync_alloc()) {
+    if (erase_if_owned(p, active_owner(s)) && can_use_active_regime_for_sync_alloc()) {
         g_in_hook = true;
-        s.gpu_hot_free(s.gpu_hot_runtime, p);
+        (void)active_regime_free(s, p);
         g_in_hook = false;
-        t.tlsf_free_success.fetch_add(1, std::memory_order_relaxed);
+        telemetry_free_success();
         return CUDA_SUCCESS;
     }
-    t.tlsf_free_miss.fetch_add(1, std::memory_order_relaxed);
+    telemetry_free_miss();
     t.fallback_free_calls.fetch_add(1, std::memory_order_relaxed);
     if (!s.real_cu_mem_free_v2 && !s.real_cu_mem_free) try_recover_symbols();
     if (s.real_cu_mem_free_v2) return s.real_cu_mem_free_v2(dptr);
@@ -556,20 +755,21 @@ extern "C" CUresult cuMemAllocAsync(CUdeviceptr* dptr, size_t bytesize, CUstream
     t.alloc_bytes_requested.fetch_add(static_cast<uint64_t>(bytesize), std::memory_order_relaxed);
     if (!dptr) return CUDA_ERROR_INVALID_VALUE;
     if (should_strict_reject()) return CUDA_ERROR_NOT_SUPPORTED;
-    if (!s.async_tlsf || g_in_hook || !can_use_tlsf_for_sync_alloc()) {
+    if (!s.async_tlsf || g_in_hook || !can_use_active_regime_for_sync_alloc()) {
         t.fallback_alloc_calls.fetch_add(1, std::memory_order_relaxed);
         return driver_alloc_async_fallback(s, dptr, bytesize, hStream);
     }
     g_in_hook = true;
-    void* p = s.gpu_hot_alloc(s.gpu_hot_runtime, bytesize);
+    void* p = nullptr;
+    const bool ok = active_regime_alloc(s, &p, bytesize);
     g_in_hook = false;
-    if (p) {
+    if (ok) {
         *dptr = reinterpret_cast<CUdeviceptr>(p);
-        remember_tlsf_ptr(p, static_cast<uint64_t>(bytesize), ApiKind::DriverAsync);
-        t.tlsf_alloc_success.fetch_add(1, std::memory_order_relaxed);
+        remember_owned_ptr(p, active_owner(s), static_cast<uint64_t>(bytesize), ApiKind::DriverAsync);
+        telemetry_alloc_success();
         return CUDA_SUCCESS;
     }
-    t.tlsf_alloc_fail.fetch_add(1, std::memory_order_relaxed);
+    telemetry_alloc_fail();
     t.fallback_alloc_calls.fetch_add(1, std::memory_order_relaxed);
     return driver_alloc_async_fallback(s, dptr, bytesize, hStream);
 }
@@ -587,14 +787,14 @@ extern "C" CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
         return driver_free_async_fallback(s, dptr, hStream);
     }
     if (should_strict_reject()) return CUDA_ERROR_NOT_SUPPORTED;
-    if (erase_if_tlsf(p) && can_use_tlsf_for_sync_alloc()) {
+    if (erase_if_owned(p, active_owner(s)) && can_use_active_regime_for_sync_alloc()) {
         g_in_hook = true;
-        s.gpu_hot_free(s.gpu_hot_runtime, p);
+        (void)active_regime_free(s, p);
         g_in_hook = false;
-        t.tlsf_free_success.fetch_add(1, std::memory_order_relaxed);
+        telemetry_free_success();
         return CUDA_SUCCESS;
     }
-    t.tlsf_free_miss.fetch_add(1, std::memory_order_relaxed);
+    telemetry_free_miss();
     t.fallback_free_calls.fetch_add(1, std::memory_order_relaxed);
     return driver_free_async_fallback(s, dptr, hStream);
 }
@@ -626,22 +826,23 @@ extern "C" cudaError_t cudaMalloc(void** devPtr, size_t size) {
     t.alloc_bytes_requested.fetch_add(static_cast<uint64_t>(size), std::memory_order_relaxed);
     if (!devPtr) return cudaErrorInvalidValue;
     if (should_strict_reject()) return cudaErrorNotSupported;
-    if (g_in_hook || !can_use_tlsf_for_sync_alloc()) {
+    if (g_in_hook || !can_use_active_regime_for_sync_alloc()) {
         t.fallback_alloc_calls.fetch_add(1, std::memory_order_relaxed);
         if (!s.real_cuda_malloc) try_recover_symbols();
         return s.real_cuda_malloc ? s.real_cuda_malloc(devPtr, size) : cudaErrorInitializationError;
     }
 
     g_in_hook = true;
-    void* p = s.gpu_hot_alloc(s.gpu_hot_runtime, size);
+    void* p = nullptr;
+    const bool ok = active_regime_alloc(s, &p, size);
     g_in_hook = false;
-    if (p) {
+    if (ok) {
         *devPtr = p;
-        remember_tlsf_ptr(p, static_cast<uint64_t>(size), ApiKind::RuntimeSync);
-        t.tlsf_alloc_success.fetch_add(1, std::memory_order_relaxed);
+        remember_owned_ptr(p, active_owner(s), static_cast<uint64_t>(size), ApiKind::RuntimeSync);
+        telemetry_alloc_success();
         return cudaSuccess;
     }
-    t.tlsf_alloc_fail.fetch_add(1, std::memory_order_relaxed);
+    telemetry_alloc_fail();
     t.fallback_alloc_calls.fetch_add(1, std::memory_order_relaxed);
     if (!s.real_cuda_malloc) try_recover_symbols();
     return s.real_cuda_malloc ? s.real_cuda_malloc(devPtr, size) : cudaErrorMemoryAllocation;
@@ -720,14 +921,14 @@ extern "C" cudaError_t cudaFree(void* devPtr) {
     if (g_in_hook) return s.real_cuda_free ? s.real_cuda_free(devPtr) : cudaErrorInitializationError;
 
     if (should_strict_reject()) return cudaErrorNotSupported;
-    if (erase_if_tlsf(devPtr) && can_use_tlsf_for_sync_alloc()) {
+    if (erase_if_owned(devPtr, active_owner(s)) && can_use_active_regime_for_sync_alloc()) {
         g_in_hook = true;
-        s.gpu_hot_free(s.gpu_hot_runtime, devPtr);
+        (void)active_regime_free(s, devPtr);
         g_in_hook = false;
-        t.tlsf_free_success.fetch_add(1, std::memory_order_relaxed);
+        telemetry_free_success();
         return cudaSuccess;
     }
-    t.tlsf_free_miss.fetch_add(1, std::memory_order_relaxed);
+    telemetry_free_miss();
     t.fallback_free_calls.fetch_add(1, std::memory_order_relaxed);
     if (!s.real_cuda_free) try_recover_symbols();
     return s.real_cuda_free ? s.real_cuda_free(devPtr) : cudaErrorInvalidDevicePointer;
@@ -743,20 +944,21 @@ extern "C" cudaError_t cudaMallocAsync(void** devPtr, size_t size, cudaStream_t 
     t.alloc_bytes_requested.fetch_add(static_cast<uint64_t>(size), std::memory_order_relaxed);
     if (!devPtr) return cudaErrorInvalidValue;
     if (should_strict_reject()) return cudaErrorNotSupported;
-    if (!s.async_tlsf || g_in_hook || !can_use_tlsf_for_sync_alloc()) {
+    if (!s.async_tlsf || g_in_hook || !can_use_active_regime_for_sync_alloc()) {
         t.fallback_alloc_calls.fetch_add(1, std::memory_order_relaxed);
         return runtime_alloc_async_fallback(s, devPtr, size, hStream);
     }
     g_in_hook = true;
-    void* p = s.gpu_hot_alloc(s.gpu_hot_runtime, size);
+    void* p = nullptr;
+    const bool ok = active_regime_alloc(s, &p, size);
     g_in_hook = false;
-    if (p) {
+    if (ok) {
         *devPtr = p;
-        remember_tlsf_ptr(p, static_cast<uint64_t>(size), ApiKind::RuntimeAsync);
-        t.tlsf_alloc_success.fetch_add(1, std::memory_order_relaxed);
+        remember_owned_ptr(p, active_owner(s), static_cast<uint64_t>(size), ApiKind::RuntimeAsync);
+        telemetry_alloc_success();
         return cudaSuccess;
     }
-    t.tlsf_alloc_fail.fetch_add(1, std::memory_order_relaxed);
+    telemetry_alloc_fail();
     t.fallback_alloc_calls.fetch_add(1, std::memory_order_relaxed);
     return runtime_alloc_async_fallback(s, devPtr, size, hStream);
 }
@@ -773,14 +975,14 @@ extern "C" cudaError_t cudaFreeAsync(void* devPtr, cudaStream_t hStream) {
         return runtime_free_async_fallback(s, devPtr, hStream);
     }
     if (should_strict_reject()) return cudaErrorNotSupported;
-    if (erase_if_tlsf(devPtr) && can_use_tlsf_for_sync_alloc()) {
+    if (erase_if_owned(devPtr, active_owner(s)) && can_use_active_regime_for_sync_alloc()) {
         g_in_hook = true;
-        s.gpu_hot_free(s.gpu_hot_runtime, devPtr);
+        (void)active_regime_free(s, devPtr);
         g_in_hook = false;
-        t.tlsf_free_success.fetch_add(1, std::memory_order_relaxed);
+        telemetry_free_success();
         return cudaSuccess;
     }
-    t.tlsf_free_miss.fetch_add(1, std::memory_order_relaxed);
+    telemetry_free_miss();
     t.fallback_free_calls.fetch_add(1, std::memory_order_relaxed);
     return runtime_free_async_fallback(s, devPtr, hStream);
 }
@@ -808,6 +1010,10 @@ extern "C" int fercuda_intercept_telemetry_get(fercuda_intercept_stats_t* out_st
     out_stats->tlsf_alloc_fail = t.tlsf_alloc_fail.load(std::memory_order_relaxed);
     out_stats->tlsf_free_success = t.tlsf_free_success.load(std::memory_order_relaxed);
     out_stats->tlsf_free_miss = t.tlsf_free_miss.load(std::memory_order_relaxed);
+    out_stats->sizeclass_alloc_success = t.sizeclass_alloc_success.load(std::memory_order_relaxed);
+    out_stats->sizeclass_alloc_fail = t.sizeclass_alloc_fail.load(std::memory_order_relaxed);
+    out_stats->sizeclass_free_success = t.sizeclass_free_success.load(std::memory_order_relaxed);
+    out_stats->sizeclass_free_miss = t.sizeclass_free_miss.load(std::memory_order_relaxed);
     out_stats->fallback_alloc_calls = t.fallback_alloc_calls.load(std::memory_order_relaxed);
     out_stats->fallback_free_calls = t.fallback_free_calls.load(std::memory_order_relaxed);
     out_stats->fallback_async_to_sync_calls = t.fallback_async_to_sync_calls.load(std::memory_order_relaxed);
@@ -839,6 +1045,10 @@ extern "C" void fercuda_intercept_telemetry_reset(void) {
     t.tlsf_alloc_fail.store(0, std::memory_order_relaxed);
     t.tlsf_free_success.store(0, std::memory_order_relaxed);
     t.tlsf_free_miss.store(0, std::memory_order_relaxed);
+    t.sizeclass_alloc_success.store(0, std::memory_order_relaxed);
+    t.sizeclass_alloc_fail.store(0, std::memory_order_relaxed);
+    t.sizeclass_free_success.store(0, std::memory_order_relaxed);
+    t.sizeclass_free_miss.store(0, std::memory_order_relaxed);
     t.fallback_alloc_calls.store(0, std::memory_order_relaxed);
     t.fallback_free_calls.store(0, std::memory_order_relaxed);
     t.fallback_async_to_sync_calls.store(0, std::memory_order_relaxed);
@@ -856,6 +1066,9 @@ extern "C" __attribute__((destructor)) void fercuda_intercept_shutdown() {
     if (!s.initialized) return;
     bool expected = false;
     if (!s.shutdown_done.compare_exchange_strong(expected, true)) return;
+    if (s.regime == RegimeKind::SizeClass) {
+        sizeclass_shutdown(s);
+    }
     if (s.gpu_hot_shutdown && s.gpu_hot_runtime) {
         s.gpu_hot_shutdown(s.gpu_hot_runtime);
         s.gpu_hot_runtime = nullptr;

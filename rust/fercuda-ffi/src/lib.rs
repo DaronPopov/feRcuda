@@ -1,11 +1,23 @@
 pub use fercuda_math as math;
 pub use fercuda_ml_lite as ml;
 pub use fercuda_vision_lite as vision;
+pub mod adapter_backend;
 pub mod ml_adapter;
 #[cfg(feature = "candle")]
 pub mod candle_adapter;
+#[cfg(feature = "cudarc")]
+pub mod cudarc_adapter;
 #[cfg(feature = "candle")]
-pub use candle_adapter::{download_tensor_f32, upload_tensor_f32, CandleAdapterError};
+pub use candle_adapter::{
+    download_tensor_f32, upload_tensor_f32, CandleAdapterError, CandleBuffer, CandleSessionAdapter,
+    OpRunConfig, validate_layer_norm_dims, validate_matmul_dims,
+};
+pub use adapter_backend::{AdapterExecutionBackend, BACKEND_SLOT_IN_PATTERN};
+#[cfg(feature = "cudarc")]
+pub use cudarc_adapter::{
+    CudarcAdapterError, CudarcOpRunConfig, CudarcSessionAdapter, CudarcTensor,
+    validate_layer_norm_dims_cudarc, validate_matmul_dims_cudarc,
+};
 pub use ml_adapter::{
     decode_bf16_le_bytes, decode_f16_le_bytes, decode_f32_le_bytes,
     dequantize_q4_affine_packed, dequantize_q4_symmetric_packed, dequantize_q8_affine_u8,

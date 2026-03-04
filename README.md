@@ -89,10 +89,27 @@ Interception compatibility env knobs:
 - `FERCUDA_GPU_HOT_SO_PATHS=/path/a.so:/path/b.so:/path/c.so`
 - `FERCUDA_INTERCEPT_ENABLE=1` (or `0` to force pure CUDA fallback)
 - `FERCUDA_INTERCEPT_MODE=permissive|strict` (default: `permissive`)
-- `FERCUDA_INTERCEPT_ASYNC_TLSF=1` to route async alloc APIs through regime path
+- `FERCUDA_INTERCEPT_REGIME=tlsf|regime2|segv2` (default: `tlsf`)
+- `FERCUDA_INTERCEPT_ASYNC_REGIME=1` to route async alloc APIs through active regime path
+- `FERCUDA_INTERCEPT_ASYNC_TLSF=1` legacy alias for async regime routing
 - `FERCUDA_INTERCEPT_DLCLOSE=1` to close shared libs on shutdown (default keeps handles open for safer teardown ordering)
 
 If async CUDA APIs are unavailable on a target runtime, the intercept layer now degrades to sync CUDA alloc/free fallback instead of hard failure.
+
+### Cache Trimming
+
+To reclaim rebuildable disk usage:
+
+```bash
+bash scripts/trim_cache.sh --dry-run
+bash scripts/trim_cache.sh
+```
+
+Optional aggressive cleanup:
+
+```bash
+bash scripts/trim_cache.sh --global-cargo --feros-state
+```
 
 ## Rust Layer
 
@@ -115,6 +132,27 @@ This test exercises:
 - permissive mode fallback paths
 - managed/host/pitch API telemetry accounting
 - strict mode rejection path in a subprocess
+
+## External Runtime Benchmark
+
+Compare external CUDA alloc/free workload in:
+- native mode
+- `feR-os` intercept/runtime mode (`LD_PRELOAD`)
+
+```bash
+bash scripts/benchmark_external_runtime.sh --iters 20000 --bytes 65536
+bash scripts/benchmark_external_runtime.sh --iters 20000 --bytes 65536 --regime sizeclass
+```
+
+Optional:
+
+```bash
+# Async alloc API path
+bash scripts/benchmark_external_runtime.sh --iters 20000 --bytes 65536 --async --async-tlsf --regime sizeclass
+
+# Explicit GPU hot runtime shared library
+bash scripts/benchmark_external_runtime.sh --gpu-hot-so /path/to/libptx_os_shared.so
+```
 
 ## Repository Layout
 
