@@ -7,7 +7,14 @@ ARCH_LIST=""
 WITH_TESTS=0
 JOBS="${JOBS:-$(nproc)}"
 REPO_URL="${FERCUDA_REPO_URL:-https://github.com/DaronPopov/feRcuda.git}"
-KEEP_WORKDIR=0
+BRANCH="${FERCUDA_BRANCH:-main}"
+UPDATE=1
+USE_LOCAL_SOURCE=0
+
+DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
+STATE_ROOT="${DATA_HOME}/fer-os"
+SOURCE_DIR="${STATE_ROOT}/src/feRcuda"
+BUILD_DIR="${STATE_ROOT}/build"
 
 print_help() {
   cat <<'USAGE'
@@ -16,15 +23,23 @@ feR-os installer (feRcuda)
 Usage:
   install.sh [options]
 
+Default behavior:
+  - Uses managed source at ~/.local/share/fer-os/src/feRcuda
+  - On rerun, updates source to latest origin/main
+  - Rebuilds and reinstalls into --prefix
+
 Options:
-  --prefix <path>       Install prefix (default: ~/.local)
-  --build-type <type>   CMake build type (default: Release)
-  --arch-list <list>    CUDA arch list for CMAKE_CUDA_ARCHITECTURES (e.g. "75;86;89")
-  --with-tests          Build and run tests after compile
-  --jobs <n>            Parallel build jobs (default: nproc)
-  --repo-url <url>      Git URL used when bootstrapping (default: https://github.com/DaronPopov/feRcuda.git)
-  --keep-workdir        Keep temporary cloned directory
-  -h, --help            Show this help
+  --prefix <path>         Install prefix (default: ~/.local)
+  --build-type <type>     CMake build type (default: Release)
+  --arch-list <list>      CUDA arch list (e.g. "75;86;89")
+  --with-tests            Build and run tests after compile
+  --jobs <n>              Parallel build jobs (default: nproc)
+  --repo-url <url>        Git URL (default: https://github.com/DaronPopov/feRcuda.git)
+  --branch <name>         Git branch/tag to track (default: main)
+  --source-dir <path>     Managed source path (default: ~/.local/share/fer-os/src/feRcuda)
+  --no-update             Reuse existing checkout without fetching latest
+  --use-local-source      Build from current directory instead of managed checkout
+  -h, --help              Show this help
 USAGE
 }
 
@@ -54,8 +69,21 @@ while [[ $# -gt 0 ]]; do
       REPO_URL="$2"
       shift 2
       ;;
-    --keep-workdir)
-      KEEP_WORKDIR=1
+    --branch)
+      BRANCH="$2"
+      shift 2
+      ;;
+    --source-dir)
+      SOURCE_DIR="$2"
+      BUILD_DIR="$(dirname "$SOURCE_DIR")/build"
+      shift 2
+      ;;
+    --no-update)
+      UPDATE=0
+      shift
+      ;;
+    --use-local-source)
+      USE_LOCAL_SOURCE=1
       shift
       ;;
     -h|--help)
@@ -85,53 +113,106 @@ if ! command -v nvcc >/dev/null 2>&1; then
   exit 1
 fi
 
-resolve_repo_root() {
-  if [[ -f "./CMakeLists.txt" && -d "./src" && -d "./include" ]]; then
-    pwd
-    return 0
-  fi
+ROOT_DIR=""
 
-  local workdir
-  workdir="$(mktemp -d /tmp/feros-install-XXXXXX)"
-  echo "[feR-os] cloning ${REPO_URL} -> ${workdir}"
-  git clone --depth 1 "${REPO_URL}" "${workdir}/feRcuda"
-  echo "${workdir}/feRcuda"
+validate_repo_layout() {
+  local p="$1"
+  [[ -f "${p}/CMakeLists.txt" && -d "${p}/src" && -d "${p}/include" ]]
 }
 
-ROOT_DIR="$(resolve_repo_root)"
-BUILD_DIR="${ROOT_DIR}/build"
+prepare_managed_source() {
+  mkdir -p "$(dirname "$SOURCE_DIR")"
 
-if [[ "${KEEP_WORKDIR}" -eq 0 && "${ROOT_DIR}" == /tmp/feros-install-*/* ]]; then
-  TMP_PARENT="$(dirname "${ROOT_DIR}")"
-  trap 'rm -rf "${TMP_PARENT}"' EXIT
+  if [[ -d "$SOURCE_DIR/.git" ]]; then
+    echo "[feR-os] using managed checkout: $SOURCE_DIR"
+    git -C "$SOURCE_DIR" remote set-url origin "$REPO_URL" || true
+    if [[ "$UPDATE" -eq 1 ]]; then
+      echo "[feR-os] updating source: origin/${BRANCH}"
+      git -C "$SOURCE_DIR" fetch --depth 1 origin "$BRANCH"
+      git -C "$SOURCE_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
+      git -C "$SOURCE_DIR" reset --hard "origin/$BRANCH"
+    fi
+  else
+    if [[ -e "$SOURCE_DIR" && ! -d "$SOURCE_DIR/.git" ]]; then
+      local backup="${SOURCE_DIR}.backup.$(date +%s)"
+      echo "[feR-os] non-git directory at source path, moving to: $backup"
+      mv "$SOURCE_DIR" "$backup"
+    fi
+    echo "[feR-os] cloning ${REPO_URL} (${BRANCH}) -> $SOURCE_DIR"
+    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$SOURCE_DIR"
+  fi
+
+  if ! validate_repo_layout "$SOURCE_DIR"; then
+    echo "Managed source is missing required project files: $SOURCE_DIR" >&2
+    exit 1
+  fi
+
+  ROOT_DIR="$SOURCE_DIR"
+}
+
+prepare_local_source() {
+  local cwd
+  cwd="$(pwd)"
+  if ! validate_repo_layout "$cwd"; then
+    echo "--use-local-source requires running inside the feRcuda repo root." >&2
+    exit 1
+  fi
+  ROOT_DIR="$cwd"
+  mkdir -p "$STATE_ROOT"
+  BUILD_DIR="${STATE_ROOT}/build-local"
+  echo "[feR-os] using local source: $ROOT_DIR"
+}
+
+if [[ "$USE_LOCAL_SOURCE" -eq 1 ]]; then
+  prepare_local_source
+else
+  prepare_managed_source
 fi
 
-mkdir -p "${BUILD_DIR}"
+mkdir -p "$BUILD_DIR"
 
 CMAKE_ARGS=(
-  -S "${ROOT_DIR}"
-  -B "${BUILD_DIR}"
-  -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+  -S "$ROOT_DIR"
+  -B "$BUILD_DIR"
+  -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
 )
 
-if [[ -n "${ARCH_LIST}" ]]; then
-  CMAKE_ARGS+=( -DCMAKE_CUDA_ARCHITECTURES="${ARCH_LIST}" )
+if [[ -n "$ARCH_LIST" ]]; then
+  CMAKE_ARGS+=( -DCMAKE_CUDA_ARCHITECTURES="$ARCH_LIST" )
 fi
 
 echo "[feR-os] configure"
 cmake "${CMAKE_ARGS[@]}"
 
 echo "[feR-os] build"
-cmake --build "${BUILD_DIR}" -j"${JOBS}"
+cmake --build "$BUILD_DIR" -j"$JOBS"
 
-echo "[feR-os] install -> ${PREFIX}"
-cmake --install "${BUILD_DIR}" --prefix "${PREFIX}"
+echo "[feR-os] install -> $PREFIX"
+cmake --install "$BUILD_DIR" --prefix "$PREFIX"
 
-if [[ "${WITH_TESTS}" -eq 1 ]]; then
+if [[ "$WITH_TESTS" -eq 1 ]]; then
   echo "[feR-os] test"
-  (cd "${BUILD_DIR}" && ctest --output-on-failure)
+  (cd "$BUILD_DIR" && ctest --output-on-failure)
+fi
+
+mkdir -p "$STATE_ROOT"
+if [[ -d "$ROOT_DIR/.git" ]]; then
+  COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD || true)"
+  BRANCH_NOW="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD || true)"
+  cat > "$STATE_ROOT/install-meta.txt" <<META
+installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+repo_url=$REPO_URL
+branch=$BRANCH_NOW
+commit=$COMMIT
+source_dir=$ROOT_DIR
+build_dir=$BUILD_DIR
+prefix=$PREFIX
+META
 fi
 
 echo "[feR-os] done"
+if [[ -f "$STATE_ROOT/install-meta.txt" ]]; then
+  echo "[feR-os] install metadata: $STATE_ROOT/install-meta.txt"
+fi
 echo "Export runtime path if needed:"
-echo "  export LD_LIBRARY_PATH=\"${PREFIX}/lib:\${LD_LIBRARY_PATH:-}\""
+echo "  export LD_LIBRARY_PATH=\"$PREFIX/lib:${LD_LIBRARY_PATH:-}\""
