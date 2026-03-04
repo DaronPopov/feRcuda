@@ -1,0 +1,22 @@
+[package]
+name = "fercuda-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Safe Rust wrapper for feRcuda C bridge"
+
+[lib]
+name = "fercuda_ffi"
+path = "src/lib.rs"
+
+[dependencies]
+fercuda-math = { path = "../deps/fercuda-math" }
+fercuda-ml-lite = { path = "../deps/fercuda-ml-lite" }
+fercuda-vision-lite = { path = "../deps/fercuda-vision-lite" }
+thiserror = "2.0"
+candle-core = { version = "0.8.4", optional = true, default-features = false }
+anyhow = { version = "1", optional = true }
+
+[features]
+default = []
+candle = ["dep:candle-core", "dep:anyhow"]

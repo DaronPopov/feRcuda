@@ -1,0 +1,22 @@
+/build/
+/.build_from_path_drift/
+*.o
+*.so
+*.a
+*.out
+*.log
+*.tmp
+*.swp
+
+# rust
+**/target/
+Cargo.lock
+
+# python
+__pycache__/
+*.pyc
+
+# editor/system
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,24 @@
+[package]
+name = "fercuda-ml-lite"
+version = "0.1.0"
+edition = "2021"
+authors = ["feRcuda Team"]
+description = "Lightweight ML utilities for feRcuda (safetensors, io, sampling)"
+license = "MIT"
+
+[lib]
+name = "fercuda_ml_lite"
+path = "src/lib.rs"
+
+[dependencies]
+safetensors = "0.4"
+memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+rand_distr = "0.4"
+half = { version = "2.4", features = ["num-traits", "bytemuck"] }
+thiserror = "2.0"
+
+[features]
+default = []

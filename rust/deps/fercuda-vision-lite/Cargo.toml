@@ -1,0 +1,29 @@
+[package]
+name = "fercuda-vision-lite"
+version = "0.1.0"
+edition = "2021"
+authors = ["feRcuda Team"]
+description = "Lightweight CV + sensor polling crate for feRcuda"
+license = "MIT"
+
+[lib]
+name = "fercuda_vision_lite"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "2.0"
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
+imageproc = { version = "0.25", optional = true, default-features = false }
+serialport = { version = "4.8", optional = true }
+v4l = { version = "0.14", optional = true }
+minifb = { version = "0.27", optional = true }
+rayon = { version = "1.10", optional = true }
+libc = { version = "0.2", optional = true }
+
+[features]
+default = ["cv"]
+cv = ["dep:image", "dep:imageproc"]
+sensor-serial = ["dep:serialport"]
+camera-v4l = ["dep:v4l", "dep:libc"]
+display = ["dep:minifb"]
+parallel = ["dep:rayon"]
