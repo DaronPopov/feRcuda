@@ -21,6 +21,10 @@ typedef struct fercuda_intercept_stats {
 
     uint64_t alloc_calls_async;
     uint64_t free_calls_async;
+    uint64_t alloc_calls_managed;
+    uint64_t alloc_calls_host;
+    uint64_t free_calls_host;
+    uint64_t alloc_calls_pitch;
 
     uint64_t alloc_bytes_requested;
 
@@ -31,6 +35,10 @@ typedef struct fercuda_intercept_stats {
 
     uint64_t fallback_alloc_calls;
     uint64_t fallback_free_calls;
+    uint64_t fallback_async_to_sync_calls;
+    uint64_t strict_mode_reject_calls;
+    uint64_t late_symbol_resolve_attempts;
+    uint64_t tracked_allocations_current;
 } fercuda_intercept_stats_t;
 
 // Returns 0 on success, non-zero on invalid argument.

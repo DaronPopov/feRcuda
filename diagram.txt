@@ -1,0 +1,59 @@
+feR-os (feRcuda) - Architecture Overview
+=======================================
+
+User / App Layer
+----------------
+  Rust apps (fercuda-ffi)   C/C++ apps   Python/FFI
+           |                    |             |
+           +--------------------+-------------+
+                                |
+                         C API: libfercuda_capi.so
+                                |
+
+Runtime / Control Plane
+-----------------------
+  RuntimeSession
+    |- JobManager
+    |- ExecPlanner
+    |- RegimeManager
+    +-> Persistent GPU Scheduler (resident CTA)
+          |- ring queue (priority/FIFO)
+          +-> dispatch OpCodes (MATMUL/NORM/ACT/ELEMENTWISE/COPY)
+
+Memory Plane
+------------
+  ElasticPool (slabs)
+    |- mutable slab (activations/scratch)
+    |- immutable slab (weights/constants)
+    +-> TLSF reclaim path (fast alloc/free reuse)
+
+Compute Plane
+-------------
+  CUDA ops kernels
+    |- elementwise
+    |- matmul
+    |- activation
+    +|- norm
+
+Integration / Compatibility
+---------------------------
+  fercuda_intercept.so (LD_PRELOAD optional)
+    |- intercept cudaMalloc/cudaFree (+ async/managed/host/pitch)
+    |- permissive mode: fallback to native CUDA when needed
+    |- strict mode: reject when regime path unavailable
+    +-> telemetry counters for compatibility behavior
+
+Build + Install + Update
+------------------------
+  One-line installer
+    curl .../scripts/install.sh | bash
+      -> managed source checkout (~/.local/share/fer-os/src/feRcuda)
+      -> update to latest origin/main on rerun
+      -> CMake build/install
+      -> Rust bootstrap (cargo fetch for crates)
+
+Outputs
+-------
+  libfercuda.a
+  libfercuda_capi.so
+  libfercuda_intercept.so

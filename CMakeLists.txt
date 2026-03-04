@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(feRcuda LANGUAGES CXX CUDA)
 find_package(CUDAToolkit REQUIRED)
+enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
@@ -102,6 +103,13 @@ target_include_directories(test_c_api_bridge PRIVATE include)
 target_link_libraries(test_c_api_bridge PRIVATE fercuda_capi)
 target_include_directories(test_c_api_custom_allocator PRIVATE include)
 target_link_libraries(test_c_api_custom_allocator PRIVATE fercuda_capi CUDA::cudart)
+
+if(TARGET fercuda_intercept)
+    add_executable(test_intercept_compat tests/intercept/test_intercept_compat.cpp)
+    target_include_directories(test_intercept_compat PRIVATE include)
+    target_link_libraries(test_intercept_compat PRIVATE fercuda_intercept CUDA::cudart CUDA::cuda_driver)
+    add_test(NAME test_intercept_compat COMMAND test_intercept_compat)
+endif()
 
 set(FERCUDA_GPU_HOT_INCLUDE_DIR "${FERCUDA_GPU_HOT_ROOT}/include")
 set(FERCUDA_GPU_HOT_LIB "${FERCUDA_GPU_HOT_ROOT}/build/libptx_os_shared.so")
