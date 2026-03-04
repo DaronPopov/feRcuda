@@ -32,6 +32,7 @@ Installer defaults:
 - managed build dir: `~/.local/share/fer-os/build`
 - install prefix: `~/.local`
 - tracked branch: `main`
+- Rust bootstrap: enabled (auto-fetches crate dependencies)
 
 Re-running the installer updates to the latest `origin/main`, rebuilds, and reinstalls.
 
@@ -43,6 +44,7 @@ Re-running the installer updates to the latest `origin/main`, rebuilds, and rein
 3. hard-resets managed checkout to tracked branch head
 4. configures/builds/installs from managed source
 5. writes install metadata to `~/.local/share/fer-os/install-meta.txt`
+6. bootstraps Rust deps via `cargo fetch` across runtime crates
 
 ## Installer Options
 
@@ -67,6 +69,9 @@ bash scripts/install.sh --prefix /opt/fer-os
 
 # Build from current working tree (no managed source update)
 bash scripts/install.sh --use-local-source
+
+# Skip Rust bootstrap
+bash scripts/install.sh --no-rust-bootstrap
 ```
 
 ## Build / Runtime Notes
@@ -79,12 +84,37 @@ If needed at runtime:
 export LD_LIBRARY_PATH="$HOME/.local/lib:${LD_LIBRARY_PATH:-}"
 ```
 
+Interception compatibility env knobs:
+- `FERCUDA_GPU_HOT_SO=/absolute/path/to/libptx_os_shared.so`
+- `FERCUDA_GPU_HOT_SO_PATHS=/path/a.so:/path/b.so:/path/c.so`
+- `FERCUDA_INTERCEPT_ENABLE=1` (or `0` to force pure CUDA fallback)
+- `FERCUDA_INTERCEPT_MODE=permissive|strict` (default: `permissive`)
+- `FERCUDA_INTERCEPT_ASYNC_TLSF=1` to route async alloc APIs through regime path
+- `FERCUDA_INTERCEPT_DLCLOSE=1` to close shared libs on shutdown (default keeps handles open for safer teardown ordering)
+
+If async CUDA APIs are unavailable on a target runtime, the intercept layer now degrades to sync CUDA alloc/free fallback instead of hard failure.
+
 ## Rust Layer
 
 - `rust/fercuda-ffi` (C API bridge)
 - `rust/deps/fercuda-ml-lite`
 - `rust/deps/fercuda-math`
 - `rust/deps/fercuda-vision-lite`
+
+## Compatibility Test Harness
+
+Intercept compatibility smoke test target:
+
+```bash
+cmake -S . -B build
+cmake --build build -j"$(nproc)" --target test_intercept_compat
+ctest --test-dir build --output-on-failure -R test_intercept_compat
+```
+
+This test exercises:
+- permissive mode fallback paths
+- managed/host/pitch API telemetry accounting
+- strict mode rejection path in a subprocess
 
 ## Repository Layout
 

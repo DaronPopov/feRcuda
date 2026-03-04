@@ -10,6 +10,7 @@ REPO_URL="${FERCUDA_REPO_URL:-https://github.com/DaronPopov/feRcuda.git}"
 BRANCH="${FERCUDA_BRANCH:-main}"
 UPDATE=1
 USE_LOCAL_SOURCE=0
+RUST_BOOTSTRAP=1
 
 DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 STATE_ROOT="${DATA_HOME}/fer-os"
@@ -39,6 +40,7 @@ Options:
   --source-dir <path>     Managed source path (default: ~/.local/share/fer-os/src/feRcuda)
   --no-update             Reuse existing checkout without fetching latest
   --use-local-source      Build from current directory instead of managed checkout
+  --no-rust-bootstrap     Skip Rust toolchain/dependency bootstrap
   -h, --help              Show this help
 USAGE
 }
@@ -86,6 +88,10 @@ while [[ $# -gt 0 ]]; do
       USE_LOCAL_SOURCE=1
       shift
       ;;
+    --no-rust-bootstrap)
+      RUST_BOOTSTRAP=0
+      shift
+      ;;
     -h|--help)
       print_help
       exit 0
@@ -112,6 +118,37 @@ if ! command -v nvcc >/dev/null 2>&1; then
   echo "nvcc not found in PATH. Install CUDA toolkit before running installer." >&2
   exit 1
 fi
+
+ensure_rust_toolchain() {
+  if command -v cargo >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "[feR-os] cargo not found, installing rustup toolchain (minimal profile)"
+  need_cmd curl
+  curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+  # shellcheck disable=SC1090
+  source "${HOME}/.cargo/env"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo still not found after rustup install." >&2
+    exit 1
+  fi
+}
+
+bootstrap_rust_crates() {
+  ensure_rust_toolchain
+  local manifests=(
+    "$ROOT_DIR/rust/fercuda-ffi/Cargo.toml"
+    "$ROOT_DIR/rust/deps/fercuda-ml-lite/Cargo.toml"
+    "$ROOT_DIR/rust/deps/fercuda-math/Cargo.toml"
+    "$ROOT_DIR/rust/deps/fercuda-vision-lite/Cargo.toml"
+  )
+  for manifest in "${manifests[@]}"; do
+    if [[ -f "$manifest" ]]; then
+      echo "[feR-os] cargo fetch -> $manifest"
+      cargo fetch --manifest-path "$manifest"
+    fi
+  done
+}
 
 ROOT_DIR=""
 
@@ -195,6 +232,11 @@ if [[ "$WITH_TESTS" -eq 1 ]]; then
   (cd "$BUILD_DIR" && ctest --output-on-failure)
 fi
 
+if [[ "$RUST_BOOTSTRAP" -eq 1 ]]; then
+  echo "[feR-os] rust bootstrap"
+  bootstrap_rust_crates
+fi
+
 mkdir -p "$STATE_ROOT"
 if [[ -d "$ROOT_DIR/.git" ]]; then
   COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD || true)"
@@ -207,6 +249,7 @@ commit=$COMMIT
 source_dir=$ROOT_DIR
 build_dir=$BUILD_DIR
 prefix=$PREFIX
+rust_bootstrap=$RUST_BOOTSTRAP
 META
 fi
 
