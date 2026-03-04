@@ -5,7 +5,7 @@ Minimal safe Rust wrapper over `libfercuda_capi.so`.
 ## Link setup
 
 By default `build.rs` links from:
-- `/home/daron/.local/lib`
+- `$HOME/.local/lib`
 
 Override with:
 - `FERCUDA_LIB_DIR=/path/to/lib`
@@ -13,7 +13,7 @@ Override with:
 At runtime, ensure the loader can find `libfercuda_capi.so`, for example:
 
 ```bash
-export LD_LIBRARY_PATH=/home/daron/.local/lib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=$HOME/.local/lib:${LD_LIBRARY_PATH}
 ```
 
 ## Example

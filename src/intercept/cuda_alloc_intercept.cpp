@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 #include "fercuda/api/intercept_telemetry.h"
@@ -166,11 +167,16 @@ void resolve_real_cuda_symbols(State& s) {
 
 void resolve_gpu_hot_symbols(State& s) {
     const char* so_path = std::getenv("FERCUDA_GPU_HOT_SO");
+    static std::string fallback_so;
     if (so_path && so_path[0] != '\0') {
         s.gpu_hot_handle = dlopen(so_path, RTLD_NOW | RTLD_LOCAL);
     }
     if (!s.gpu_hot_handle) {
-        s.gpu_hot_handle = dlopen("/home/daron/persistant_gpu_os/build/libptx_os_shared.so", RTLD_NOW | RTLD_LOCAL);
+        const char* home = std::getenv("HOME");
+        if (home && home[0] != '\0') {
+            fallback_so = std::string(home) + "/persistant_gpu_os/build/libptx_os_shared.so";
+            s.gpu_hot_handle = dlopen(fallback_so.c_str(), RTLD_NOW | RTLD_LOCAL);
+        }
     }
 
     s.gpu_hot_init = reinterpret_cast<gpu_hot_init_fn>(resolve_default_or_handle(s.gpu_hot_handle, "gpu_hot_init"));

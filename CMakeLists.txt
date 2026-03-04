@@ -15,7 +15,7 @@ if(NOT CMAKE_CUDA_ARCHITECTURES)
 endif()
 message(STATUS "feRcuda CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
-set(FERCUDA_GPU_HOT_ROOT "/home/daron/persistant_gpu_os" CACHE PATH "Path to GPU Hot Runtime project root")
+set(FERCUDA_GPU_HOT_ROOT "$ENV{HOME}/persistant_gpu_os" CACHE PATH "Path to GPU Hot Runtime project root")
 
 # Deterministic math: no fast-math, no implicit FMA fusion.
 # -fmad=false prevents nvcc from fusing a*b+c into FFMA (changes rounding).
