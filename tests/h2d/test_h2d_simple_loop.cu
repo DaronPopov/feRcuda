@@ -9,17 +9,18 @@
  */
 #include <cuda_runtime.h>
 #include <cstdio>
+#include <cstdint>
 
-// Minimal infinite-loop kernel (single thread, no __syncthreads, no __threadfence)
-__global__ void k_spin_single() {
+// Long-running finite kernels: enough work to overlap H2D, but guaranteed to end.
+__global__ void k_spin_single(uint32_t spins) {
     volatile unsigned n = 0;
-    while (true) { ++n; }
+    for (uint32_t i = 0; i < spins; ++i) { ++n; }
 }
 
 // Persistent kernel with __syncthreads (like the scheduler uses)
-__global__ void k_spin_sync(int nthreads) {
+__global__ void k_spin_sync(uint32_t spins, int nthreads) {
     volatile unsigned n = 0;
-    while (true) {
+    for (uint32_t i = 0; i < spins; ++i) {
         __syncthreads();
         if (threadIdx.x == 0) ++n;
         __syncthreads();
@@ -27,9 +28,9 @@ __global__ void k_spin_sync(int nthreads) {
 }
 
 // Persistent kernel with __threadfence
-__global__ void k_spin_fence() {
+__global__ void k_spin_fence(uint32_t spins) {
     volatile unsigned n = 0;
-    while (true) {
+    for (uint32_t i = 0; i < spins; ++i) {
         ++n;
         __threadfence();
     }
@@ -82,29 +83,35 @@ int main() {
     printf("[A] start\n"); fflush(stdout);
     ck(cudaSetDevice(0), "setDevice");
 
+    constexpr uint32_t kSpins = 20u * 1000u * 1000u;
+
     cudaStream_t ks;
 
     // ── Test 1: single-thread spin loop, no sync, no fence ───────────────────
     ck(cudaStreamCreateWithFlags(&ks, cudaStreamNonBlocking), "ks1");
-    k_spin_single<<<1, 1, 0, ks>>>();
+    k_spin_single<<<1, 1, 0, ks>>>(kSpins);
     printf("[1] launched k_spin_single (1 thread, no sync/fence)\n"); fflush(stdout);
     test_h2d("1", ks, "k_spin_single");
-    // Note: we never destroy ks since the kernel runs forever.
-    // The process cleanup will kill it.
+    ck(cudaStreamSynchronize(ks), "sync ks1");
+    ck(cudaStreamDestroy(ks), "destroy ks1");
     printf("\n"); fflush(stdout);
 
     // ── Test 2: multi-thread with __syncthreads ───────────────────────────────
     ck(cudaStreamCreateWithFlags(&ks, cudaStreamNonBlocking), "ks2");
-    k_spin_sync<<<1, 128, 0, ks>>>(128);
+    k_spin_sync<<<1, 128, 0, ks>>>(kSpins, 128);
     printf("[2] launched k_spin_sync (128 threads, __syncthreads)\n"); fflush(stdout);
     test_h2d("2", ks, "k_spin_sync");
+    ck(cudaStreamSynchronize(ks), "sync ks2");
+    ck(cudaStreamDestroy(ks), "destroy ks2");
     printf("\n"); fflush(stdout);
 
     // ── Test 3: single-thread with __threadfence ──────────────────────────────
     ck(cudaStreamCreateWithFlags(&ks, cudaStreamNonBlocking), "ks3");
-    k_spin_fence<<<1, 1, 0, ks>>>();
+    k_spin_fence<<<1, 1, 0, ks>>>(kSpins);
     printf("[3] launched k_spin_fence (1 thread, __threadfence)\n"); fflush(stdout);
     test_h2d("3", ks, "k_spin_fence");
+    ck(cudaStreamSynchronize(ks), "sync ks3");
+    ck(cudaStreamDestroy(ks), "destroy ks3");
     printf("\n"); fflush(stdout);
 
     printf("[Z] all tests done\n"); fflush(stdout);

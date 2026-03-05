@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 #include "fercuda/algorithms/matmul_attachment.cuh"
 #include "fercuda/core/runtime.cuh"
 #include "fercuda/core/status.cuh"
@@ -17,6 +19,7 @@
 namespace fer::runtime {
 
 using BufferId = uint64_t;
+using ExternalBufferDeleterFn = void (*)(void*, void*);
 
 class RuntimeSession {
 public:
@@ -31,6 +34,15 @@ public:
 
     Status alloc_buffer(const BufferDesc& desc, BufferId* out_id);
     Status alloc_buffer_with_regime(const BufferDesc& desc, uint32_t regime_id, BufferId* out_id);
+    Status import_external_buffer(const BufferDesc& desc, void* device_ptr, uint32_t regime_id, BufferId* out_id);
+    Status import_external_buffer_with_deleter(
+        const BufferDesc& desc,
+        void* device_ptr,
+        uint32_t regime_id,
+        ExternalBufferDeleterFn deleter,
+        void* deleter_user_ctx,
+        BufferId* out_id);
+    Status export_buffer_device_ptr(BufferId id, void** out_ptr) const;
     Status free_buffer(BufferId id);
 
     Status upload_bytes(BufferId id, const void* host, size_t bytes);
@@ -44,12 +56,27 @@ public:
     Status job_status(JobId id, bool* done) const;
     Status job_wait(JobId id);
 
+    Status resolve_buffer(
+        BufferId id,
+        void** out_ptr,
+        BufferDesc* out_desc,
+        size_t* out_bytes,
+        uint32_t* out_regime_id) const;
+
+    Status create_external_job(cudaStream_t stream, JobId* out_job);
+    Status set_stream(cudaStream_t stream);
+    Status get_stream(cudaStream_t* out_stream) const;
+    cudaStream_t stream() const { return ctx_.stream.value; }
+
 private:
     struct BufferRecord {
         void* ptr = nullptr;
         BufferDesc desc{};
         size_t numel = 0;
         uint32_t regime_id = static_cast<uint32_t>(MemoryRegime::CUSTOM_POOL);
+        bool external = false;
+        ExternalBufferDeleterFn deleter = nullptr;
+        void* deleter_user_ctx = nullptr;
     };
 
     Status lookup_f32_1d(BufferId id, FTensor1D* out) const;

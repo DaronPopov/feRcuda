@@ -8,13 +8,17 @@ WITH_TESTS=0
 JOBS="${JOBS:-$(nproc)}"
 REPO_URL="${FERCUDA_REPO_URL:-https://github.com/DaronPopov/feRcuda.git}"
 BRANCH="${FERCUDA_BRANCH:-main}"
+FERRITE_MCP_REPO_URL="${FERRITE_MCP_REPO_URL:-https://github.com/DaronPopov/ferrite-mcp.git}"
+FERRITE_MCP_BRANCH="${FERRITE_MCP_BRANCH:-main}"
 UPDATE=1
 USE_LOCAL_SOURCE=0
 RUST_BOOTSTRAP=1
+WITH_FERRITE_MCP=1
 
 DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 STATE_ROOT="${DATA_HOME}/fer-os"
 SOURCE_DIR="${STATE_ROOT}/src/feRcuda"
+FERRITE_MCP_SOURCE_DIR="${STATE_ROOT}/src/ferrite-mcp"
 BUILD_DIR="${STATE_ROOT}/build"
 
 print_help() {
@@ -26,8 +30,9 @@ Usage:
 
 Default behavior:
   - Uses managed source at ~/.local/share/fer-os/src/feRcuda
+  - Uses managed source at ~/.local/share/fer-os/src/ferrite-mcp
   - On rerun, updates source to latest origin/main
-  - Rebuilds and reinstalls into --prefix
+  - Rebuilds and reinstalls feRcuda + ferrite-mcp into --prefix
 
 Options:
   --prefix <path>         Install prefix (default: ~/.local)
@@ -37,7 +42,11 @@ Options:
   --jobs <n>              Parallel build jobs (default: nproc)
   --repo-url <url>        Git URL (default: https://github.com/DaronPopov/feRcuda.git)
   --branch <name>         Git branch/tag to track (default: main)
+  --ferrite-mcp-repo-url <url>  Git URL (default: https://github.com/DaronPopov/ferrite-mcp.git)
+  --ferrite-mcp-branch <name>   Git branch/tag to track (default: main)
   --source-dir <path>     Managed source path (default: ~/.local/share/fer-os/src/feRcuda)
+  --ferrite-mcp-source-dir <path> Managed source path (default: ~/.local/share/fer-os/src/ferrite-mcp)
+  --no-ferrite-mcp        Skip ferrite-mcp clone/build/install
   --no-update             Reuse existing checkout without fetching latest
   --use-local-source      Build from current directory instead of managed checkout
   --no-rust-bootstrap     Skip Rust toolchain/dependency bootstrap
@@ -75,10 +84,26 @@ while [[ $# -gt 0 ]]; do
       BRANCH="$2"
       shift 2
       ;;
+    --ferrite-mcp-repo-url)
+      FERRITE_MCP_REPO_URL="$2"
+      shift 2
+      ;;
+    --ferrite-mcp-branch)
+      FERRITE_MCP_BRANCH="$2"
+      shift 2
+      ;;
     --source-dir)
       SOURCE_DIR="$2"
       BUILD_DIR="$(dirname "$SOURCE_DIR")/build"
       shift 2
+      ;;
+    --ferrite-mcp-source-dir)
+      FERRITE_MCP_SOURCE_DIR="$2"
+      shift 2
+      ;;
+    --no-ferrite-mcp)
+      WITH_FERRITE_MCP=0
+      shift
       ;;
     --no-update)
       UPDATE=0
@@ -187,6 +212,43 @@ prepare_managed_source() {
   ROOT_DIR="$SOURCE_DIR"
 }
 
+validate_ferrite_mcp_layout() {
+  local p="$1"
+  [[ -f "${p}/Cargo.toml" ]]
+}
+
+prepare_managed_ferrite_mcp_source() {
+  if [[ "$WITH_FERRITE_MCP" -eq 0 ]]; then
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$FERRITE_MCP_SOURCE_DIR")"
+
+  if [[ -d "$FERRITE_MCP_SOURCE_DIR/.git" ]]; then
+    echo "[feR-os] using ferrite-mcp checkout: $FERRITE_MCP_SOURCE_DIR"
+    git -C "$FERRITE_MCP_SOURCE_DIR" remote set-url origin "$FERRITE_MCP_REPO_URL" || true
+    if [[ "$UPDATE" -eq 1 ]]; then
+      echo "[feR-os] updating ferrite-mcp: origin/${FERRITE_MCP_BRANCH}"
+      git -C "$FERRITE_MCP_SOURCE_DIR" fetch --depth 1 origin "$FERRITE_MCP_BRANCH"
+      git -C "$FERRITE_MCP_SOURCE_DIR" checkout -B "$FERRITE_MCP_BRANCH" "origin/$FERRITE_MCP_BRANCH"
+      git -C "$FERRITE_MCP_SOURCE_DIR" reset --hard "origin/$FERRITE_MCP_BRANCH"
+    fi
+  else
+    if [[ -e "$FERRITE_MCP_SOURCE_DIR" && ! -d "$FERRITE_MCP_SOURCE_DIR/.git" ]]; then
+      local backup="${FERRITE_MCP_SOURCE_DIR}.backup.$(date +%s)"
+      echo "[feR-os] non-git directory at ferrite-mcp path, moving to: $backup"
+      mv "$FERRITE_MCP_SOURCE_DIR" "$backup"
+    fi
+    echo "[feR-os] cloning ${FERRITE_MCP_REPO_URL} (${FERRITE_MCP_BRANCH}) -> $FERRITE_MCP_SOURCE_DIR"
+    git clone --depth 1 --branch "$FERRITE_MCP_BRANCH" "$FERRITE_MCP_REPO_URL" "$FERRITE_MCP_SOURCE_DIR"
+  fi
+
+  if ! validate_ferrite_mcp_layout "$FERRITE_MCP_SOURCE_DIR"; then
+    echo "ferrite-mcp source is missing required files: $FERRITE_MCP_SOURCE_DIR" >&2
+    exit 1
+  fi
+}
+
 prepare_local_source() {
   local cwd
   cwd="$(pwd)"
@@ -205,6 +267,7 @@ if [[ "$USE_LOCAL_SOURCE" -eq 1 ]]; then
 else
   prepare_managed_source
 fi
+prepare_managed_ferrite_mcp_source
 
 mkdir -p "$BUILD_DIR"
 
@@ -237,10 +300,22 @@ if [[ "$RUST_BOOTSTRAP" -eq 1 ]]; then
   bootstrap_rust_crates
 fi
 
+if [[ "$WITH_FERRITE_MCP" -eq 1 ]]; then
+  ensure_rust_toolchain
+  echo "[feR-os] install ferrite-mcp -> $PREFIX"
+  cargo install --path "$FERRITE_MCP_SOURCE_DIR" --force --root "$PREFIX"
+fi
+
 mkdir -p "$STATE_ROOT"
 if [[ -d "$ROOT_DIR/.git" ]]; then
   COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD || true)"
   BRANCH_NOW="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD || true)"
+  FERRITE_MCP_COMMIT=""
+  FERRITE_MCP_BRANCH_NOW=""
+  if [[ "$WITH_FERRITE_MCP" -eq 1 && -d "$FERRITE_MCP_SOURCE_DIR/.git" ]]; then
+    FERRITE_MCP_COMMIT="$(git -C "$FERRITE_MCP_SOURCE_DIR" rev-parse --short HEAD || true)"
+    FERRITE_MCP_BRANCH_NOW="$(git -C "$FERRITE_MCP_SOURCE_DIR" rev-parse --abbrev-ref HEAD || true)"
+  fi
   cat > "$STATE_ROOT/install-meta.txt" <<META
 installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 repo_url=$REPO_URL
@@ -250,6 +325,11 @@ source_dir=$ROOT_DIR
 build_dir=$BUILD_DIR
 prefix=$PREFIX
 rust_bootstrap=$RUST_BOOTSTRAP
+ferrite_mcp_enabled=$WITH_FERRITE_MCP
+ferrite_mcp_repo_url=$FERRITE_MCP_REPO_URL
+ferrite_mcp_branch=$FERRITE_MCP_BRANCH_NOW
+ferrite_mcp_commit=$FERRITE_MCP_COMMIT
+ferrite_mcp_source_dir=$FERRITE_MCP_SOURCE_DIR
 META
 fi
 

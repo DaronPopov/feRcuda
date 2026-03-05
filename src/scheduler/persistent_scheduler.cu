@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <chrono>
+#include <sstream>
 
 namespace fer {
 
@@ -55,31 +57,24 @@ __global__ void fer_scheduler_kernel(SchedState* st) {
 
     while (!st->shutdown_req) {
         if (smwarp) {
-            uint32_t claim = 0xFFFFFFFFu;
-            if (lane == 0) {
-                while (true) {
-                    uint32_t tail = st->tail;
-                    uint32_t head = st->head;
-                    if (tail == head) break;
-                    if (atomicCAS(reinterpret_cast<unsigned int*>(const_cast<uint32_t*>(&st->tail)),
-                                  tail, tail + 1) == tail) {
-                        claim = tail;
-                        break;
-                    }
-                }
-            }
-            claim = __shfl_sync(0xFFFFFFFFu, claim, 0);
-            if (claim == 0xFFFFFFFFu) {
-                if (lane == 0 && warp == 0) {
-                    atomicAdd(reinterpret_cast<unsigned long long*>(const_cast<uint64_t*>(&st->cycles_idle)), 1ULL);
-                }
-                __syncthreads();
+            // SMWARP mode still launches multi-block residency, but use a
+            // single control lane with conservative tail advancement:
+            // process tail item, mark done, then advance tail only across
+            // contiguous done entries. This prevents tail > head over-claim.
+            if (!(blockIdx.x == 0 && warp == 0 && lane == 0)) {
                 continue;
             }
 
-            uint32_t idx = claim & (SCHED_QUEUE_LEN - 1);
+            uint32_t head = st->head;
+            uint32_t tail = st->tail;
+            if (tail == head) {
+                atomicAdd(reinterpret_cast<unsigned long long*>(const_cast<uint64_t*>(&st->cycles_idle)), 1ULL);
+                continue;
+            }
+
+            uint32_t idx = tail & (SCHED_QUEUE_LEN - 1);
             volatile WorkItem* vw = (volatile WorkItem*)&st->queue[idx];
-            if (!vw->done && lane == 0) {
+            if (!vw->done) {
                 OpCode op = vw->op;
                 if (op == OpCode::SHUTDOWN) {
                     vw->done = true;
@@ -93,7 +88,15 @@ __global__ void fer_scheduler_kernel(SchedState* st) {
                     atomicAdd(reinterpret_cast<unsigned long long*>(const_cast<uint64_t*>(&st->warp_dispatches)), 1ULL);
                 }
             }
-            __syncthreads();
+            while (st->tail != st->head &&
+                   ((volatile WorkItem*)&st->queue[
+                       st->tail & (SCHED_QUEUE_LEN - 1)])->done) {
+                st->tail++;
+            }
+            // Defensive clamp: if visibility races momentarily push tail past
+            // a stale head snapshot, keep queue depth arithmetic non-negative.
+            uint32_t head_now = st->head;
+            if (st->tail > head_now) st->tail = head_now;
             continue;
         }
 
@@ -208,19 +211,51 @@ uint32_t Scheduler::submit(OpCode op, uint8_t priority,
 {
     uint32_t head = 0;
     uint32_t tail = 0;
+    const auto t0 = std::chrono::steady_clock::now();
     while (true) {
-        CK(cudaMemcpyAsync(&head,
-                           const_cast<uint32_t*>(&dstate_->head),
-                           sizeof(uint32_t),
-                           cudaMemcpyDeviceToHost,
-                           control_stream_));
-        CK(cudaMemcpyAsync(&tail,
-                           const_cast<uint32_t*>(&dstate_->tail),
-                           sizeof(uint32_t),
-                           cudaMemcpyDeviceToHost,
-                           control_stream_));
-        CK(cudaStreamSynchronize(control_stream_));
-        if ((head - tail) < static_cast<uint32_t>(SCHED_QUEUE_LEN - 1)) break;
+        CK(cudaMemcpy(&head,
+                      const_cast<uint32_t*>(&dstate_->head),
+                      sizeof(uint32_t),
+                      cudaMemcpyDeviceToHost));
+        CK(cudaMemcpy(&tail,
+                      const_cast<uint32_t*>(&dstate_->tail),
+                      sizeof(uint32_t),
+                      cudaMemcpyDeviceToHost));
+        uint32_t queued = (head >= tail) ? (head - tail) : 0u;
+        if (queued < static_cast<uint32_t>(SCHED_QUEUE_LEN - 1)) break;
+        const auto waited_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        if (waited_ms > 30000) {
+            uint64_t done = 0;
+            uint32_t resident = 0;
+            uint32_t launch_blocks = 0;
+            cudaMemcpy(&done,
+                       const_cast<uint64_t*>(
+                           reinterpret_cast<volatile uint64_t*>(&dstate_->ops_completed)),
+                       sizeof(uint64_t),
+                       cudaMemcpyDeviceToHost);
+            cudaMemcpy(&resident,
+                       const_cast<uint32_t*>(
+                           reinterpret_cast<volatile uint32_t*>(&dstate_->resident_blocks)),
+                       sizeof(uint32_t),
+                       cudaMemcpyDeviceToHost);
+            cudaMemcpy(&launch_blocks,
+                       const_cast<uint32_t*>(
+                           reinterpret_cast<volatile uint32_t*>(&dstate_->launch_blocks)),
+                       sizeof(uint32_t),
+                       cudaMemcpyDeviceToHost);
+            std::ostringstream oss;
+            oss << "Scheduler::submit timeout waiting for queue space"
+                << " head=" << head
+                << " tail=" << tail
+                << " next_id=" << next_id_
+                << " ops_completed=" << done
+                << " resident_blocks=" << resident
+                << " launch_blocks=" << launch_blocks;
+            throw std::runtime_error(oss.str());
+        }
         std::this_thread::yield();
     }
 
@@ -234,18 +269,15 @@ uint32_t Scheduler::submit(OpCode op, uint8_t priority,
         item.args[i] = args[i];
 
     // Write item then bump head
-    CK(cudaMemcpyAsync(&dstate_->queue[idx],
-                       &item,
-                       sizeof(WorkItem),
-                       cudaMemcpyHostToDevice,
-                       control_stream_));
+    CK(cudaMemcpy(&dstate_->queue[idx],
+                  &item,
+                  sizeof(WorkItem),
+                  cudaMemcpyHostToDevice));
     uint32_t new_head = head + 1;
-    CK(cudaMemcpyAsync(const_cast<uint32_t*>(&dstate_->head),
-                       &new_head,
-                       sizeof(uint32_t),
-                       cudaMemcpyHostToDevice,
-                       control_stream_));
-    CK(cudaStreamSynchronize(control_stream_));
+    CK(cudaMemcpy(const_cast<uint32_t*>(&dstate_->head),
+                  &new_head,
+                  sizeof(uint32_t),
+                  cudaMemcpyHostToDevice));
 
     return item.id;
 }
@@ -256,13 +288,12 @@ void Scheduler::launch(int threads, ExecRegime regime) {
     const uint32_t blocks = (regime == ExecRegime::SMWARP) ? static_cast<uint32_t>(sms) : 1u;
     const uint32_t regime_raw = static_cast<uint32_t>(regime);
     const uint32_t zero_u32 = 0;
-    CK(cudaMemcpyAsync(const_cast<uint32_t*>(&dstate_->regime), &regime_raw,
-                       sizeof(uint32_t), cudaMemcpyHostToDevice, control_stream_));
-    CK(cudaMemcpyAsync(const_cast<uint32_t*>(&dstate_->launch_blocks), &blocks,
-                       sizeof(uint32_t), cudaMemcpyHostToDevice, control_stream_));
-    CK(cudaMemcpyAsync(const_cast<uint32_t*>(&dstate_->resident_blocks), &zero_u32,
-                       sizeof(uint32_t), cudaMemcpyHostToDevice, control_stream_));
-    CK(cudaStreamSynchronize(control_stream_));
+    CK(cudaMemcpy(const_cast<uint32_t*>(&dstate_->regime), &regime_raw,
+                  sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(const_cast<uint32_t*>(&dstate_->launch_blocks), &blocks,
+                  sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(const_cast<uint32_t*>(&dstate_->resident_blocks), &zero_u32,
+                  sizeof(uint32_t), cudaMemcpyHostToDevice));
     fer_scheduler_kernel<<<blocks, threads, 0, kernel_stream_>>>(dstate_);
     launched_ = true;
 }
@@ -271,62 +302,100 @@ void Scheduler::sync() {
     // Poll ops_completed via DMA until the kernel has processed all submitted work.
     // Yield between polls to avoid burning the host CPU in a tight spin.
     uint64_t done = 0;
+    const auto t0 = std::chrono::steady_clock::now();
     do {
         std::this_thread::yield();
-        CK(cudaMemcpyAsync(&done,
-                           const_cast<uint64_t*>(
-                               reinterpret_cast<volatile uint64_t*>(&dstate_->ops_completed)),
-                           sizeof(uint64_t),
-                           cudaMemcpyDeviceToHost,
-                           control_stream_));
-        CK(cudaStreamSynchronize(control_stream_));
+        CK(cudaMemcpy(&done,
+                      const_cast<uint64_t*>(
+                          reinterpret_cast<volatile uint64_t*>(&dstate_->ops_completed)),
+                      sizeof(uint64_t),
+                      cudaMemcpyDeviceToHost));
+        const auto waited_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        if (waited_ms > 30000) {
+            uint32_t head = 0;
+            uint32_t tail = 0;
+            uint32_t resident = 0;
+            cudaMemcpy(&head,
+                       const_cast<uint32_t*>(&dstate_->head),
+                       sizeof(uint32_t),
+                       cudaMemcpyDeviceToHost);
+            cudaMemcpy(&tail,
+                       const_cast<uint32_t*>(&dstate_->tail),
+                       sizeof(uint32_t),
+                       cudaMemcpyDeviceToHost);
+            cudaMemcpy(&resident,
+                       const_cast<uint32_t*>(
+                           reinterpret_cast<volatile uint32_t*>(&dstate_->resident_blocks)),
+                       sizeof(uint32_t),
+                       cudaMemcpyDeviceToHost);
+            std::ostringstream oss;
+            oss << "Scheduler::sync timeout waiting for ops_completed"
+                << " done=" << done
+                << " next_id=" << next_id_
+                << " head=" << head
+                << " tail=" << tail
+                << " resident_blocks=" << resident;
+            throw std::runtime_error(oss.str());
+        }
     } while (done < next_id_);
 }
 
 void Scheduler::shutdown() {
     uint64_t args[SCHED_MAX_ARGS] = {};
     submit(OpCode::SHUTDOWN, 0, args, 0);
-    CK(cudaStreamSynchronize(kernel_stream_));
+    const auto t0 = std::chrono::steady_clock::now();
+    while (true) {
+        cudaError_t q = cudaStreamQuery(kernel_stream_);
+        if (q == cudaSuccess) break;
+        if (q != cudaErrorNotReady) CK(q);
+        const auto waited_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        if (waited_ms > 5000) {
+            throw std::runtime_error("Scheduler::shutdown timeout waiting for kernel stream");
+        }
+        std::this_thread::yield();
+    }
     launched_ = false;
 }
 
 uint64_t Scheduler::ops_completed() const {
     uint64_t v;
-    cudaMemcpyAsync(&v,
-                    const_cast<uint64_t*>(
-                        reinterpret_cast<volatile uint64_t*>(&dstate_->ops_completed)),
-                    sizeof(uint64_t), cudaMemcpyDeviceToHost, control_stream_);
-    cudaStreamSynchronize(control_stream_);
+    cudaMemcpy(&v,
+               const_cast<uint64_t*>(
+                   reinterpret_cast<volatile uint64_t*>(&dstate_->ops_completed)),
+               sizeof(uint64_t), cudaMemcpyDeviceToHost);
     return v;
 }
 
 uint64_t Scheduler::warp_dispatches() const {
     uint64_t v = 0;
-    cudaMemcpyAsync(&v,
-                    const_cast<uint64_t*>(
-                        reinterpret_cast<volatile uint64_t*>(&dstate_->warp_dispatches)),
-                    sizeof(uint64_t), cudaMemcpyDeviceToHost, control_stream_);
-    cudaStreamSynchronize(control_stream_);
+    cudaMemcpy(&v,
+               const_cast<uint64_t*>(
+                   reinterpret_cast<volatile uint64_t*>(&dstate_->warp_dispatches)),
+               sizeof(uint64_t), cudaMemcpyDeviceToHost);
     return v;
 }
 
 uint32_t Scheduler::resident_blocks() const {
     uint32_t v = 0;
-    cudaMemcpyAsync(&v,
-                    const_cast<uint32_t*>(
-                        reinterpret_cast<volatile uint32_t*>(&dstate_->resident_blocks)),
-                    sizeof(uint32_t), cudaMemcpyDeviceToHost, control_stream_);
-    cudaStreamSynchronize(control_stream_);
+    cudaMemcpy(&v,
+               const_cast<uint32_t*>(
+                   reinterpret_cast<volatile uint32_t*>(&dstate_->resident_blocks)),
+               sizeof(uint32_t), cudaMemcpyDeviceToHost);
     return v;
 }
 
 uint32_t Scheduler::launch_blocks() const {
     uint32_t v = 0;
-    cudaMemcpyAsync(&v,
-                    const_cast<uint32_t*>(
-                        reinterpret_cast<volatile uint32_t*>(&dstate_->launch_blocks)),
-                    sizeof(uint32_t), cudaMemcpyDeviceToHost, control_stream_);
-    cudaStreamSynchronize(control_stream_);
+    cudaMemcpy(&v,
+               const_cast<uint32_t*>(
+                   reinterpret_cast<volatile uint32_t*>(&dstate_->launch_blocks)),
+               sizeof(uint32_t), cudaMemcpyDeviceToHost);
     return v;
 }
 

@@ -57,9 +57,23 @@ set_target_properties(fercuda PROPERTIES
 
 add_library(fercuda_capi SHARED
     src/runtime/c_api.cu
+    src/runtime/mcp_adapter.cpp
+    src/runtime/mcp_json_adapter.cpp
+    src/jit/jit_manager.cu
+    src/jit/script_runtime.cpp
+    src/jit/intent/intent_runtime.cpp
+    src/jit/lowering/capabilities/cuda_caps.cpp
+    src/jit/lowering/capabilities/capability_lowering_pass.cpp
+    src/jit/lowering/fusion/fusion_pass.cpp
+    src/jit/lowering/pipeline/lowering_pipeline.cpp
+    src/jit/lowering/transforms/pragma_parse_pass.cpp
+    src/jit/lowering/transforms/canonicalize_pass.cpp
 )
 target_include_directories(fercuda_capi PUBLIC include)
-target_link_libraries(fercuda_capi PRIVATE fercuda CUDA::cudart)
+target_link_libraries(fercuda_capi PRIVATE fercuda CUDA::cudart CUDA::cuda_driver CUDA::nvrtc)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(fercuda_capi PRIVATE dl)
+endif()
 set_target_properties(fercuda_capi PROPERTIES
     OUTPUT_NAME fercuda_capi
 )
@@ -89,6 +103,21 @@ add_executable(test_pool_reclaim tests/memory/test_pool_reclaim.cu)
 add_executable(test_pool_fragmentation_ab tests/memory/test_pool_fragmentation_ab.cu)
 add_executable(test_c_api_bridge tests/c_api/test_c_api_bridge.cpp)
 add_executable(test_c_api_custom_allocator tests/c_api/test_c_api_custom_allocator.cpp)
+add_executable(test_c_api_jit_stub tests/c_api/test_c_api_jit_stub.cpp)
+add_executable(test_c_api_jit_exec tests/c_api/test_c_api_jit_exec.cpp)
+add_executable(test_c_api_jit_lowering tests/c_api/test_c_api_jit_lowering.cpp)
+add_executable(test_c_api_jit_intent tests/c_api/test_c_api_jit_intent.cpp)
+add_executable(test_c_api_external_ptr_interop tests/c_api/test_c_api_external_ptr_interop.cpp)
+add_executable(test_c_api_stream_handoff tests/c_api/test_c_api_stream_handoff.cpp)
+add_executable(test_c_api_helper_api tests/c_api/test_c_api_helper_api.cpp)
+add_executable(test_c_api_agent_mcp_adapter tests/c_api/test_c_api_agent_mcp_adapter.cpp)
+add_executable(test_c_api_agent_mcp_json_adapter tests/c_api/test_c_api_agent_mcp_json_adapter.cpp)
+add_library(test_script_module MODULE tests/jit/test_script_module.cpp)
+set_target_properties(test_script_module PROPERTIES PREFIX "")
+add_library(test_script_cancel_module MODULE tests/jit/test_script_cancel_module.cpp)
+set_target_properties(test_script_cancel_module PROPERTIES PREFIX "")
+add_executable(test_c_api_script_runtime tests/c_api/test_c_api_script_runtime.cpp)
+add_executable(test_c_api_script_timeout tests/c_api/test_c_api_script_timeout.cpp)
 
 foreach(t test_types test_determinism test_ca test_ca_kernels test_registry test_runtime_session test_memory_regime test_custom_allocator test_pool_reclaim test_pool_fragmentation_ab)
     target_include_directories(${t} PRIVATE include)
@@ -103,6 +132,36 @@ target_include_directories(test_c_api_bridge PRIVATE include)
 target_link_libraries(test_c_api_bridge PRIVATE fercuda_capi)
 target_include_directories(test_c_api_custom_allocator PRIVATE include)
 target_link_libraries(test_c_api_custom_allocator PRIVATE fercuda_capi CUDA::cudart)
+target_include_directories(test_c_api_jit_stub PRIVATE include)
+target_link_libraries(test_c_api_jit_stub PRIVATE fercuda_capi)
+target_include_directories(test_c_api_jit_exec PRIVATE include)
+target_link_libraries(test_c_api_jit_exec PRIVATE fercuda_capi)
+target_include_directories(test_c_api_jit_lowering PRIVATE include)
+target_link_libraries(test_c_api_jit_lowering PRIVATE fercuda_capi)
+target_include_directories(test_c_api_jit_intent PRIVATE include)
+target_link_libraries(test_c_api_jit_intent PRIVATE fercuda_capi)
+target_include_directories(test_c_api_external_ptr_interop PRIVATE include)
+target_link_libraries(test_c_api_external_ptr_interop PRIVATE fercuda_capi CUDA::cudart)
+target_include_directories(test_c_api_stream_handoff PRIVATE include)
+target_link_libraries(test_c_api_stream_handoff PRIVATE fercuda_capi CUDA::cudart)
+target_include_directories(test_c_api_helper_api PRIVATE include)
+target_link_libraries(test_c_api_helper_api PRIVATE fercuda_capi)
+target_include_directories(test_c_api_agent_mcp_adapter PRIVATE include)
+target_link_libraries(test_c_api_agent_mcp_adapter PRIVATE fercuda_capi)
+target_include_directories(test_c_api_agent_mcp_json_adapter PRIVATE include)
+target_link_libraries(test_c_api_agent_mcp_json_adapter PRIVATE fercuda_capi)
+target_include_directories(test_script_module PRIVATE include)
+target_link_libraries(test_script_module PRIVATE fercuda_capi)
+target_include_directories(test_script_cancel_module PRIVATE include)
+target_link_libraries(test_script_cancel_module PRIVATE fercuda_capi)
+target_include_directories(test_c_api_script_runtime PRIVATE include)
+target_link_libraries(test_c_api_script_runtime PRIVATE fercuda_capi)
+target_compile_definitions(test_c_api_script_runtime PRIVATE
+    TEST_SCRIPT_MODULE_PATH="$<TARGET_FILE:test_script_module>")
+target_include_directories(test_c_api_script_timeout PRIVATE include)
+target_link_libraries(test_c_api_script_timeout PRIVATE fercuda_capi)
+target_compile_definitions(test_c_api_script_timeout PRIVATE
+    TEST_SCRIPT_CANCEL_MODULE_PATH="$<TARGET_FILE:test_script_cancel_module>")
 
 if(TARGET fercuda_intercept)
     add_executable(test_intercept_compat tests/intercept/test_intercept_compat.cpp)
@@ -157,11 +216,6 @@ add_executable(test_sched_smwarp tests/scheduler/test_sched_smwarp.cu)
 target_include_directories(test_sched_smwarp PRIVATE include)
 target_link_libraries(test_sched_smwarp PRIVATE fercuda)
 set_target_properties(test_sched_smwarp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-add_executable(bench_sched_regimes tests/scheduler/bench_sched_regimes.cu)
-target_include_directories(bench_sched_regimes PRIVATE include)
-target_link_libraries(bench_sched_regimes PRIVATE fercuda)
-set_target_properties(bench_sched_regimes PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 add_executable(test_h2d_while_sched   tests/h2d/test_h2d_while_sched.cu)
 

@@ -29,22 +29,25 @@ curl -fsSL https://raw.githubusercontent.com/DaronPopov/feRcuda/main/scripts/ins
 
 Installer defaults:
 - managed checkout: `~/.local/share/fer-os/src/feRcuda`
+- managed checkout: `~/.local/share/fer-os/src/ferrite-mcp`
 - managed build dir: `~/.local/share/fer-os/build`
 - install prefix: `~/.local`
 - tracked branch: `main`
 - Rust bootstrap: enabled (auto-fetches crate dependencies)
+- ferrite-mcp install: enabled (installed via `cargo install --path ... --root ~/.local`)
 
 Re-running the installer updates to the latest `origin/main`, rebuilds, and reinstalls.
 
 ## Installer Behavior (Managed)
 
 `scripts/install.sh` is stateful and self-managed:
-1. keeps a local managed git checkout
-2. fetches latest remote commit on rerun
-3. hard-resets managed checkout to tracked branch head
-4. configures/builds/installs from managed source
-5. writes install metadata to `~/.local/share/fer-os/install-meta.txt`
-6. bootstraps Rust deps via `cargo fetch` across runtime crates
+1. keeps managed git checkouts for `feRcuda` and `ferrite-mcp`
+2. fetches latest remote commits on rerun
+3. hard-resets managed checkouts to tracked branch heads
+4. configures/builds/installs `feRcuda` from managed source
+5. installs `ferrite-mcp` into the same prefix
+6. writes install metadata to `~/.local/share/fer-os/install-meta.txt`
+7. bootstraps Rust deps via `cargo fetch` across runtime crates
 
 ## Installer Options
 
@@ -72,6 +75,9 @@ bash scripts/install.sh --use-local-source
 
 # Skip Rust bootstrap
 bash scripts/install.sh --no-rust-bootstrap
+
+# Skip ferrite-mcp install (not recommended for full feR-os setup)
+bash scripts/install.sh --no-ferrite-mcp
 ```
 
 ## Build / Runtime Notes
@@ -162,3 +168,8 @@ bash scripts/benchmark_external_runtime.sh --gpu-hot-so /path/to/libptx_os_share
 - `examples/` usage demos
 - `rust/` Rust adapters/deps
 - `scripts/install.sh` managed installer
+
+## Agent Control Plane Design
+
+- `JIT_CONTRACTS.md` defines the in-runtime JIT/script contracts.
+- `AGENT_MCP_CONTRACTS.md` defines the MCP-facing agent control plane (`ferrite-mcp` <-> `feRcuda`) for headless feR-os operation.

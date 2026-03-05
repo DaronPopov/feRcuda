@@ -112,16 +112,79 @@ Status RuntimeSession::alloc_buffer_with_regime(const BufferDesc& desc, uint32_t
     if (!as.ok()) return as;
 
     BufferId id = next_buffer_id_++;
-    buffers_[id] = BufferRecord{ptr, desc, numel_from_desc(desc), rr.raw};
+    buffers_[id] = BufferRecord{ptr, desc, numel_from_desc(desc), rr.raw, false, nullptr, nullptr};
     *out_id = id;
+    return Status::ok_status();
+}
+
+Status RuntimeSession::import_external_buffer(
+    const BufferDesc& desc,
+    void* device_ptr,
+    uint32_t regime_id,
+    BufferId* out_id) {
+    if (!out_id) return Status::invalid_argument("out_id is null");
+    if (!device_ptr) return Status::invalid_argument("device_ptr is null");
+    if (desc.rank == 0 || desc.rank > 4) return Status::invalid_argument("rank must be in [1,4]");
+    size_t bytes = bytes_for_desc(desc);
+    if (bytes == 0) return Status::invalid_argument("unsupported dtype or empty buffer");
+
+    ResolvedRegime rr{};
+    Status rs = regime_mgr_.resolve(regime_id, &rr);
+    if (!rs.ok()) return rs;
+
+    BufferId id = next_buffer_id_++;
+    buffers_[id] = BufferRecord{device_ptr, desc, numel_from_desc(desc), rr.raw, true, nullptr, nullptr};
+    *out_id = id;
+    return Status::ok_status();
+}
+
+Status RuntimeSession::import_external_buffer_with_deleter(
+    const BufferDesc& desc,
+    void* device_ptr,
+    uint32_t regime_id,
+    ExternalBufferDeleterFn deleter,
+    void* deleter_user_ctx,
+    BufferId* out_id) {
+    if (!out_id) return Status::invalid_argument("out_id is null");
+    if (!device_ptr) return Status::invalid_argument("device_ptr is null");
+    if (desc.rank == 0 || desc.rank > 4) return Status::invalid_argument("rank must be in [1,4]");
+    size_t bytes = bytes_for_desc(desc);
+    if (bytes == 0) return Status::invalid_argument("unsupported dtype or empty buffer");
+
+    ResolvedRegime rr{};
+    Status rs = regime_mgr_.resolve(regime_id, &rr);
+    if (!rs.ok()) return rs;
+
+    BufferId id = next_buffer_id_++;
+    buffers_[id] = BufferRecord{
+        device_ptr,
+        desc,
+        numel_from_desc(desc),
+        rr.raw,
+        true,
+        deleter,
+        deleter_user_ctx};
+    *out_id = id;
+    return Status::ok_status();
+}
+
+Status RuntimeSession::export_buffer_device_ptr(BufferId id, void** out_ptr) const {
+    if (!out_ptr) return Status::invalid_argument("out_ptr is null");
+    auto it = buffers_.find(id);
+    if (it == buffers_.end()) return Status::not_found("buffer id not found");
+    *out_ptr = it->second.ptr;
     return Status::ok_status();
 }
 
 Status RuntimeSession::free_buffer(BufferId id) {
     auto it = buffers_.find(id);
     if (it == buffers_.end()) return Status::not_found("buffer id not found");
-    Status st = regime_mgr_.free_bytes(it->second.ptr, it->second.regime_id);
-    if (!st.ok()) return st;
+    if (!it->second.external) {
+        Status st = regime_mgr_.free_bytes(it->second.ptr, it->second.regime_id);
+        if (!st.ok()) return st;
+    } else if (it->second.deleter) {
+        it->second.deleter(it->second.ptr, it->second.deleter_user_ctx);
+    }
     buffers_.erase(it);
     return Status::ok_status();
 }
@@ -277,6 +340,39 @@ Status RuntimeSession::job_status(JobId id, bool* done) const {
 
 Status RuntimeSession::job_wait(JobId id) {
     return job_mgr_.wait(id);
+}
+
+Status RuntimeSession::resolve_buffer(
+    BufferId id,
+    void** out_ptr,
+    BufferDesc* out_desc,
+    size_t* out_bytes,
+    uint32_t* out_regime_id) const {
+    if (!out_ptr) return Status::invalid_argument("out_ptr is null");
+    auto it = buffers_.find(id);
+    if (it == buffers_.end()) return Status::not_found("buffer id not found");
+    const BufferRecord& rec = it->second;
+    *out_ptr = rec.ptr;
+    if (out_desc) *out_desc = rec.desc;
+    if (out_bytes) *out_bytes = bytes_for_desc(rec.desc);
+    if (out_regime_id) *out_regime_id = rec.regime_id;
+    return Status::ok_status();
+}
+
+Status RuntimeSession::create_external_job(cudaStream_t stream, JobId* out_job) {
+    std::vector<TempAlloc> temps;
+    return job_mgr_.create_job(temps, stream, out_job);
+}
+
+Status RuntimeSession::set_stream(cudaStream_t stream) {
+    ctx_.stream = StreamHandle(stream);
+    return Status::ok_status();
+}
+
+Status RuntimeSession::get_stream(cudaStream_t* out_stream) const {
+    if (!out_stream) return Status::invalid_argument("out_stream is null");
+    *out_stream = ctx_.stream.value;
+    return Status::ok_status();
 }
 
 } // namespace fer::runtime
