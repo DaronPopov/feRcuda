@@ -228,10 +228,14 @@ prepare_managed_ferrite_mcp_source() {
     echo "[feR-os] using ferrite-mcp checkout: $FERRITE_MCP_SOURCE_DIR"
     git -C "$FERRITE_MCP_SOURCE_DIR" remote set-url origin "$FERRITE_MCP_REPO_URL" || true
     if [[ "$UPDATE" -eq 1 ]]; then
-      echo "[feR-os] updating ferrite-mcp: origin/${FERRITE_MCP_BRANCH}"
-      git -C "$FERRITE_MCP_SOURCE_DIR" fetch --depth 1 origin "$FERRITE_MCP_BRANCH"
-      git -C "$FERRITE_MCP_SOURCE_DIR" checkout -B "$FERRITE_MCP_BRANCH" "origin/$FERRITE_MCP_BRANCH"
-      git -C "$FERRITE_MCP_SOURCE_DIR" reset --hard "origin/$FERRITE_MCP_BRANCH"
+      if [[ -n "$(git -C "$FERRITE_MCP_SOURCE_DIR" status --porcelain)" ]]; then
+        echo "[feR-os] ferrite-mcp has local changes; skipping update/reset to preserve custom checkout"
+      else
+        echo "[feR-os] updating ferrite-mcp: origin/${FERRITE_MCP_BRANCH}"
+        git -C "$FERRITE_MCP_SOURCE_DIR" fetch --depth 1 origin "$FERRITE_MCP_BRANCH"
+        git -C "$FERRITE_MCP_SOURCE_DIR" checkout -B "$FERRITE_MCP_BRANCH" "origin/$FERRITE_MCP_BRANCH"
+        git -C "$FERRITE_MCP_SOURCE_DIR" reset --hard "origin/$FERRITE_MCP_BRANCH"
+      fi
     fi
   else
     if [[ -e "$FERRITE_MCP_SOURCE_DIR" && ! -d "$FERRITE_MCP_SOURCE_DIR/.git" ]]; then
@@ -303,7 +307,12 @@ fi
 if [[ "$WITH_FERRITE_MCP" -eq 1 ]]; then
   ensure_rust_toolchain
   echo "[feR-os] install ferrite-mcp -> $PREFIX"
-  cargo install --path "$FERRITE_MCP_SOURCE_DIR" --force --root "$PREFIX"
+  cargo install \
+    --path "$FERRITE_MCP_SOURCE_DIR/crates/shell-bin" \
+    --bin ferrite \
+    --locked \
+    --force \
+    --root "$PREFIX"
 fi
 
 mkdir -p "$STATE_ROOT"
