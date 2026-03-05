@@ -3,6 +3,7 @@
 #include "fercuda/jit/intent/intent.h"
 
 #include <atomic>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -233,6 +234,58 @@ extern "C" fer_status_t fer_agent_tensor_copy(
     return invalid("invalid copy direction");
 }
 
+extern "C" fer_status_t fer_agent_tensor_release(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t tensor_id) {
+    if (!adapter) return invalid("adapter is null");
+    fer_session_t* session = nullptr;
+    TensorRecord record{};
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        auto sit = adapter->sessions.find(session_id);
+        if (sit == adapter->sessions.end()) return not_found("session_id not found");
+        auto tit = adapter->tensors.find(tensor_id);
+        if (tit == adapter->tensors.end()) return not_found("tensor_id not found");
+        if (tit->second.session_id != session_id) return invalid("tensor/session mismatch");
+        session = sit->second;
+        record = tit->second;
+    }
+    fer_status_t st = fer_tensor_release(session, record.handle);
+    if (st.code != FER_STATUS_OK) return st;
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        adapter->tensors.erase(tensor_id);
+    }
+    return ok_status();
+}
+
+extern "C" fer_status_t fer_agent_tensor_list(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t* out_tensor_ids,
+    size_t capacity,
+    size_t* out_count) {
+    if (!adapter) return invalid("adapter is null");
+    if (!out_count) return invalid("out_count is null");
+    std::lock_guard<std::mutex> lock(adapter->mu);
+    if (adapter->sessions.find(session_id) == adapter->sessions.end()) {
+        return not_found("session_id not found");
+    }
+    std::vector<uint64_t> ids;
+    ids.reserve(adapter->tensors.size());
+    for (const auto& kv : adapter->tensors) {
+        if (kv.second.session_id == session_id) ids.push_back(kv.first);
+    }
+    std::sort(ids.begin(), ids.end());
+    *out_count = ids.size();
+    if (out_tensor_ids && capacity > 0) {
+        const size_t n = std::min(capacity, ids.size());
+        for (size_t i = 0; i < n; ++i) out_tensor_ids[i] = ids[i];
+    }
+    return ok_status();
+}
+
 extern "C" fer_status_t fer_agent_jit_intent_run_affine_f32(
     fer_agent_adapter_t* adapter,
     const fer_agent_intent_affine_f32_request_t* req,
@@ -300,7 +353,116 @@ extern "C" fer_status_t fer_agent_job_wait(
         if (jit->second.session_id != session_id) return invalid("job/session mismatch");
         session = sit->second;
     }
-    return fer_job_wait(session, job_id);
+    fer_status_t st = fer_job_wait(session, job_id);
+    if (st.code != FER_STATUS_OK) return st;
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        adapter->jobs.erase(job_id);
+    }
+    return ok_status();
+}
+
+extern "C" fer_status_t fer_agent_job_cancel(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t job_id,
+    uint8_t* out_cancelled) {
+    if (!adapter) return invalid("adapter is null");
+    if (!out_cancelled) return invalid("out_cancelled is null");
+    *out_cancelled = 0u;
+    fer_session_t* session = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        auto sit = adapter->sessions.find(session_id);
+        if (sit == adapter->sessions.end()) return not_found("session_id not found");
+        auto jit = adapter->jobs.find(job_id);
+        if (jit == adapter->jobs.end()) return not_found("job_id not found");
+        if (jit->second.session_id != session_id) return invalid("job/session mismatch");
+        session = sit->second;
+    }
+
+    uint8_t done = 0u;
+    fer_status_t st = fer_job_status(session, job_id, &done);
+    if (st.code != FER_STATUS_OK) return st;
+    if (!done) {
+        return invalid("job cancel is unsupported for running jobs");
+    }
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        adapter->jobs.erase(job_id);
+    }
+    *out_cancelled = 1u;
+    return ok_status();
+}
+
+extern "C" fer_status_t fer_agent_session_list(
+    fer_agent_adapter_t* adapter,
+    uint64_t* out_session_ids,
+    size_t capacity,
+    size_t* out_count) {
+    if (!adapter) return invalid("adapter is null");
+    if (!out_count) return invalid("out_count is null");
+    std::lock_guard<std::mutex> lock(adapter->mu);
+    std::vector<uint64_t> ids;
+    ids.reserve(adapter->sessions.size());
+    for (const auto& kv : adapter->sessions) ids.push_back(kv.first);
+    std::sort(ids.begin(), ids.end());
+    *out_count = ids.size();
+    if (out_session_ids && capacity > 0) {
+        const size_t n = std::min(capacity, ids.size());
+        for (size_t i = 0; i < n; ++i) out_session_ids[i] = ids[i];
+    }
+    return ok_status();
+}
+
+extern "C" fer_status_t fer_agent_job_list(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t* out_job_ids,
+    size_t capacity,
+    size_t* out_count) {
+    if (!adapter) return invalid("adapter is null");
+    if (!out_count) return invalid("out_count is null");
+    std::lock_guard<std::mutex> lock(adapter->mu);
+    if (adapter->sessions.find(session_id) == adapter->sessions.end()) {
+        return not_found("session_id not found");
+    }
+    std::vector<uint64_t> ids;
+    ids.reserve(adapter->jobs.size());
+    for (const auto& kv : adapter->jobs) {
+        if (kv.second.session_id == session_id) ids.push_back(kv.first);
+    }
+    std::sort(ids.begin(), ids.end());
+    *out_count = ids.size();
+    if (out_job_ids && capacity > 0) {
+        const size_t n = std::min(capacity, ids.size());
+        for (size_t i = 0; i < n; ++i) out_job_ids[i] = ids[i];
+    }
+    return ok_status();
+}
+
+extern "C" fer_status_t fer_agent_session_stats(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    size_t* out_tensor_count,
+    size_t* out_job_count) {
+    if (!adapter) return invalid("adapter is null");
+    if (!out_tensor_count || !out_job_count) return invalid("stats out pointers are null");
+    std::lock_guard<std::mutex> lock(adapter->mu);
+    if (adapter->sessions.find(session_id) == adapter->sessions.end()) {
+        return not_found("session_id not found");
+    }
+    size_t tensor_count = 0;
+    for (const auto& kv : adapter->tensors) {
+        if (kv.second.session_id == session_id) ++tensor_count;
+    }
+    size_t job_count = 0;
+    for (const auto& kv : adapter->jobs) {
+        if (kv.second.session_id == session_id) ++job_count;
+    }
+    *out_tensor_count = tensor_count;
+    *out_job_count = job_count;
+    return ok_status();
 }
 
 extern "C" fer_status_t fer_agent_blob_put(

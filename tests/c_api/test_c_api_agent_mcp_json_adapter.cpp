@@ -1,8 +1,11 @@
 #include "fercuda/agent/mcp_json_adapter.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <vector>
 
 static int fail(const char* msg) {
@@ -47,6 +50,11 @@ int main() {
     uint64_t session_id = json_u64(out, "session_id");
     if (session_id == 0) return fail("session_id parse");
 
+    if (fer_agent_mcp_dispatch(adapter, "fer.session.list", "{\"agent_api_version\":\"v1alpha1\"}", out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch session.list");
+    }
+    if (!json_has(out, "\"count\":1")) return fail("session.list count");
+
     char tensor_create[512];
     std::snprintf(
         tensor_create, sizeof(tensor_create),
@@ -64,6 +72,26 @@ int main() {
     }
     uint64_t y = json_u64(out, "tensor_id");
     if (!y) return fail("tensor_id y parse");
+
+    char tensor_list_json[256];
+    std::snprintf(
+        tensor_list_json, sizeof(tensor_list_json),
+        "{\"agent_api_version\":\"v1alpha1\",\"session_id\":%llu}",
+        static_cast<unsigned long long>(session_id));
+    if (fer_agent_mcp_dispatch(adapter, "fer.tensor.list", tensor_list_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch tensor.list");
+    }
+    if (!json_has(out, "\"count\":2")) return fail("tensor.list count");
+
+    char session_stats_json[256];
+    std::snprintf(
+        session_stats_json, sizeof(session_stats_json),
+        "{\"agent_api_version\":\"v1alpha1\",\"session_id\":%llu}",
+        static_cast<unsigned long long>(session_id));
+    if (fer_agent_mcp_dispatch(adapter, "fer.session.stats", session_stats_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch session.stats before run");
+    }
+    if (!json_has(out, "\"tensor_count\":2")) return fail("session.stats tensor_count before run");
 
     constexpr size_t n = 128;
     std::vector<float> in(n, 4.0f);
@@ -115,6 +143,21 @@ int main() {
     uint64_t job_id = json_u64(out, "job_id");
     if (!job_id) return fail("job_id parse");
 
+    char job_list_json[256];
+    std::snprintf(
+        job_list_json, sizeof(job_list_json),
+        "{\"agent_api_version\":\"v1alpha1\",\"session_id\":%llu}",
+        static_cast<unsigned long long>(session_id));
+    if (fer_agent_mcp_dispatch(adapter, "fer.job.list", job_list_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch job.list before wait");
+    }
+    if (!json_has(out, "\"count\":1")) return fail("job.list count before wait");
+
+    if (fer_agent_mcp_dispatch(adapter, "fer.session.stats", session_stats_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch session.stats with in-flight job");
+    }
+    if (!json_has(out, "\"job_count\":1")) return fail("session.stats job_count in-flight");
+
     char wait_json[256];
     std::snprintf(
         wait_json, sizeof(wait_json),
@@ -124,6 +167,41 @@ int main() {
     if (fer_agent_mcp_dispatch(adapter, "fer.job.wait", wait_json, out, sizeof(out)).code != FER_STATUS_OK) {
         return fail("dispatch job.wait");
     }
+
+    if (fer_agent_mcp_dispatch(adapter, "fer.job.list", job_list_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch job.list after wait");
+    }
+    if (!json_has(out, "\"count\":0")) return fail("job.list count after wait");
+
+    if (fer_agent_mcp_dispatch(adapter, "fer.jit.intent.run", run_intent, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch jit.intent.run #2");
+    }
+    uint64_t job_id2 = json_u64(out, "job_id");
+    if (!job_id2) return fail("job_id2 parse");
+    char wait_json2[256];
+    std::snprintf(
+        wait_json2, sizeof(wait_json2),
+        "{\"agent_api_version\":\"v1alpha1\",\"session_id\":%llu,\"job_id\":%llu}",
+        static_cast<unsigned long long>(session_id),
+        static_cast<unsigned long long>(job_id2));
+    bool cancelled_ok = false;
+    for (int i = 0; i < 100; ++i) {
+        const fer_status_t st_cancel = fer_agent_mcp_dispatch(adapter, "fer.job.cancel", wait_json2, out, sizeof(out));
+        if (st_cancel.code == FER_STATUS_OK && json_has(out, "\"cancelled\":true")) {
+            cancelled_ok = true;
+            break;
+        }
+        if (!json_has(out, "unsupported for running jobs")) {
+            return fail("dispatch job.cancel unexpected error");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!cancelled_ok) return fail("dispatch job.cancel completed");
+
+    if (fer_agent_mcp_dispatch(adapter, "fer.session.stats", session_stats_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch session.stats after wait");
+    }
+    if (!json_has(out, "\"job_count\":0")) return fail("session.stats job_count after wait");
 
     char copy_d2h[512];
     std::snprintf(
@@ -170,6 +248,38 @@ int main() {
         return fail("expected version error");
     }
     if (!json_has(out, "\"ok\":false")) return fail("error envelope");
+
+    if (setenv("FERCUDA_AGENT_MAX_TENSOR_BYTES", "128", 1) != 0) {
+        return fail("setenv FERCUDA_AGENT_MAX_TENSOR_BYTES");
+    }
+    if (fer_agent_mcp_dispatch(adapter, "fer.tensor.create", tensor_create, out, sizeof(out)).code == FER_STATUS_OK) {
+        return fail("expected policy denial for oversized tensor");
+    }
+    if (!json_has(out, "RESOURCE_EXHAUSTED")) return fail("policy denial error code text");
+    unsetenv("FERCUDA_AGENT_MAX_TENSOR_BYTES");
+
+    char release_x_json[256];
+    std::snprintf(
+        release_x_json, sizeof(release_x_json),
+        "{\"agent_api_version\":\"v1alpha1\",\"session_id\":%llu,\"tensor_id\":%llu}",
+        static_cast<unsigned long long>(session_id),
+        static_cast<unsigned long long>(x));
+    if (fer_agent_mcp_dispatch(adapter, "fer.tensor.release", release_x_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch tensor.release x");
+    }
+    char release_y_json[256];
+    std::snprintf(
+        release_y_json, sizeof(release_y_json),
+        "{\"agent_api_version\":\"v1alpha1\",\"session_id\":%llu,\"tensor_id\":%llu}",
+        static_cast<unsigned long long>(session_id),
+        static_cast<unsigned long long>(y));
+    if (fer_agent_mcp_dispatch(adapter, "fer.tensor.release", release_y_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch tensor.release y");
+    }
+    if (fer_agent_mcp_dispatch(adapter, "fer.tensor.list", tensor_list_json, out, sizeof(out)).code != FER_STATUS_OK) {
+        return fail("dispatch tensor.list after release");
+    }
+    if (!json_has(out, "\"count\":0")) return fail("tensor.list count after release");
 
     char destroy_json[256];
     std::snprintf(

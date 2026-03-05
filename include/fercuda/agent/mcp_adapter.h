@@ -85,6 +85,16 @@ fer_status_t fer_agent_tensor_create(
 fer_status_t fer_agent_tensor_copy(
     fer_agent_adapter_t* adapter,
     const fer_agent_tensor_copy_request_t* req);
+fer_status_t fer_agent_tensor_release(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t tensor_id);
+fer_status_t fer_agent_tensor_list(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t* out_tensor_ids,
+    size_t capacity,
+    size_t* out_count);
 
 fer_status_t fer_agent_jit_intent_run_affine_f32(
     fer_agent_adapter_t* adapter,
@@ -95,6 +105,27 @@ fer_status_t fer_agent_job_wait(
     fer_agent_adapter_t* adapter,
     uint64_t session_id,
     uint64_t job_id);
+fer_status_t fer_agent_job_cancel(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t job_id,
+    uint8_t* out_cancelled);
+fer_status_t fer_agent_session_list(
+    fer_agent_adapter_t* adapter,
+    uint64_t* out_session_ids,
+    size_t capacity,
+    size_t* out_count);
+fer_status_t fer_agent_job_list(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t* out_job_ids,
+    size_t capacity,
+    size_t* out_count);
+fer_status_t fer_agent_session_stats(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    size_t* out_tensor_count,
+    size_t* out_job_count);
 
 // Blob store APIs for out-of-process transport adapters.
 // Data is copied into adapter-owned memory.
