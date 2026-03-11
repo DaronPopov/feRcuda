@@ -1,36 +1,60 @@
 cmake_minimum_required(VERSION 3.20)
 project(feRcuda LANGUAGES CXX CUDA)
+
 find_package(CUDAToolkit REQUIRED)
-enable_testing()
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Allow caller-provided arch list. If omitted, use a portable default that
-# includes datacenter + modern Jetson targets.
-set(FERCUDA_DEFAULT_CUDA_ARCHS "75;80;86;87;89;90" CACHE STRING
-    "Default CUDA architectures for feRcuda when CMAKE_CUDA_ARCHITECTURES is not provided")
-if(NOT CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "${FERCUDA_DEFAULT_CUDA_ARCHS}" CACHE STRING
-        "CUDA architectures to build for" FORCE)
+# Prefer the local GPU's compute capability when available. This keeps fresh
+# builds portable across developer workstations and ARM64 systems like DGX
+# Spark, while still allowing scripts/install.sh --arch-list to override.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    find_program(NVIDIA_SMI_EXECUTABLE nvidia-smi)
+    if(NVIDIA_SMI_EXECUTABLE)
+        execute_process(
+            COMMAND ${NVIDIA_SMI_EXECUTABLE} --query-gpu=compute_cap --format=csv,noheader
+            OUTPUT_VARIABLE FERCUDA_COMPUTE_CAPS_RAW
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(FERCUDA_COMPUTE_CAPS_RAW)
+            string(REPLACE "\r" "" FERCUDA_COMPUTE_CAPS_RAW "${FERCUDA_COMPUTE_CAPS_RAW}")
+            string(REPLACE "\n" ";" FERCUDA_COMPUTE_CAPS_LIST "${FERCUDA_COMPUTE_CAPS_RAW}")
+            set(FERCUDA_CUDA_ARCH_LIST "")
+            foreach(FERCUDA_CC IN LISTS FERCUDA_COMPUTE_CAPS_LIST)
+                string(STRIP "${FERCUDA_CC}" FERCUDA_CC)
+                if(FERCUDA_CC STREQUAL "")
+                    continue()
+                endif()
+                string(REPLACE "." "" FERCUDA_ARCH "${FERCUDA_CC}")
+                if(FERCUDA_ARCH MATCHES "^[0-9]+$")
+                    list(APPEND FERCUDA_CUDA_ARCH_LIST "${FERCUDA_ARCH}")
+                endif()
+            endforeach()
+            list(REMOVE_DUPLICATES FERCUDA_CUDA_ARCH_LIST)
+            if(FERCUDA_CUDA_ARCH_LIST)
+                set(CMAKE_CUDA_ARCHITECTURES "${FERCUDA_CUDA_ARCH_LIST}" CACHE STRING
+                    "CUDA architectures to build for" FORCE)
+                message(STATUS "Auto-detected CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+            endif()
+        endif()
+    endif()
 endif()
-message(STATUS "feRcuda CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
-set(FERCUDA_GPU_HOT_ROOT "$ENV{HOME}/persistant_gpu_os" CACHE PATH "Path to GPU Hot Runtime project root")
+set(FERCUDA_GPU_HOT_ROOT "/home/daron/persistant_gpu_os" CACHE PATH
+    "Path to GPU Hot Runtime project root")
 
 # Deterministic math: no fast-math, no implicit FMA fusion.
-# -fmad=false prevents nvcc from fusing a*b+c into FFMA (changes rounding).
-# We deliberately omit --use_fast_math (off by default).
 set(CUDA_DETERMINISTIC_FLAGS
     -fmad=false
-    --prec-div=true
-    --prec-sqrt=true
     -Xptxas=-O3
     --generate-line-info
 )
 
-# ─── Library ───────────────────────────────────────────────────────────────────
-add_library(fercuda STATIC
+set(FERCUDA_LIBRARY_SOURCES
     src/memory/elastic_pool.cu
     src/scheduler/persistent_scheduler.cu
     src/runtime/regime_manager.cu
@@ -43,13 +67,43 @@ add_library(fercuda STATIC
     src/ops/norm.cu
 )
 
-target_include_directories(fercuda PUBLIC include)
+set(FERCUDA_CUDA_TESTS
+    test_types tests/core/test_types.cu
+    test_determinism tests/core/test_determinism.cu
+    test_ca tests/experimental/test_ca.cu
+    test_ca_kernels tests/experimental/test_ca_kernels.cu
+    test_registry tests/runtime/test_registry.cu
+    test_runtime_session tests/runtime/test_runtime_session.cu
+    test_memory_regime tests/memory/test_memory_regime.cu
+    test_custom_allocator tests/memory/test_custom_allocator.cu
+    test_pool_fragmentation_ab tests/memory/test_pool_fragmentation_ab.cu
+    test_pool_reclaim tests/memory/test_pool_reclaim.cu
+    test_sched_dma_then_ops tests/scheduler/test_sched_dma_then_ops.cu
+    test_sched_minimal tests/scheduler/test_sched_minimal.cu
+    test_sched_ops_interop tests/scheduler/test_sched_ops_interop.cu
+    test_sched_pool_interop tests/scheduler/test_sched_pool_interop.cu
+    test_sched_smwarp tests/scheduler/test_sched_smwarp.cu
+    test_sched_work tests/scheduler/test_sched_work.cu
+    test_h2d_isolate tests/h2d/test_h2d_isolate.cu
+    test_h2d_simple_loop tests/h2d/test_h2d_simple_loop.cu
+    test_h2d_while_sched tests/h2d/test_h2d_while_sched.cu
+)
 
+function(fercuda_configure_cuda_target target)
+    target_include_directories(${target} PRIVATE include)
+    target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_DETERMINISTIC_FLAGS}>
+    )
+    set_target_properties(${target} PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+endfunction()
+
+add_library(fercuda STATIC ${FERCUDA_LIBRARY_SOURCES})
+target_include_directories(fercuda PUBLIC include)
 target_compile_options(fercuda PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_DETERMINISTIC_FLAGS}>
 )
-target_compile_definitions(fercuda PRIVATE FERCUDA_FLIGHT_MODE=1)
-
 set_target_properties(fercuda PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     POSITION_INDEPENDENT_CODE ON
@@ -79,101 +133,92 @@ set_target_properties(fercuda_capi PROPERTIES
 )
 
 if(UNIX AND NOT APPLE)
-    add_library(fercuda_intercept SHARED
-        src/intercept/cuda_alloc_intercept.cpp
-    )
+    add_library(fercuda_intercept SHARED src/intercept/cuda_alloc_intercept.cpp)
     target_include_directories(fercuda_intercept PRIVATE include)
     target_link_libraries(fercuda_intercept PRIVATE CUDA::cudart CUDA::cuda_driver dl)
     target_compile_definitions(fercuda_intercept PRIVATE _GNU_SOURCE)
     set_target_properties(fercuda_intercept PROPERTIES
         OUTPUT_NAME fercuda_intercept
+        POSITION_INDEPENDENT_CODE ON
     )
 endif()
 
-# ─── Tests ─────────────────────────────────────────────────────────────────────
-add_executable(test_types        tests/core/test_types.cu)
-add_executable(test_determinism  tests/core/test_determinism.cu)
-add_executable(test_ca           tests/experimental/test_ca.cu)
-add_executable(test_ca_kernels   tests/experimental/test_ca_kernels.cu)
-add_executable(test_registry     tests/runtime/test_registry.cu)
-add_executable(test_runtime_session tests/runtime/test_runtime_session.cu)
-add_executable(test_memory_regime tests/memory/test_memory_regime.cu)
-add_executable(test_custom_allocator tests/memory/test_custom_allocator.cu)
-add_executable(test_pool_reclaim tests/memory/test_pool_reclaim.cu)
-add_executable(test_pool_fragmentation_ab tests/memory/test_pool_fragmentation_ab.cu)
-add_executable(test_c_api_bridge tests/c_api/test_c_api_bridge.cpp)
-add_executable(test_c_api_custom_allocator tests/c_api/test_c_api_custom_allocator.cpp)
-add_executable(test_c_api_jit_stub tests/c_api/test_c_api_jit_stub.cpp)
-add_executable(test_c_api_jit_exec tests/c_api/test_c_api_jit_exec.cpp)
-add_executable(test_c_api_jit_lowering tests/c_api/test_c_api_jit_lowering.cpp)
-add_executable(test_c_api_jit_intent tests/c_api/test_c_api_jit_intent.cpp)
-add_executable(test_c_api_external_ptr_interop tests/c_api/test_c_api_external_ptr_interop.cpp)
-add_executable(test_c_api_stream_handoff tests/c_api/test_c_api_stream_handoff.cpp)
-add_executable(test_c_api_helper_api tests/c_api/test_c_api_helper_api.cpp)
-add_executable(test_c_api_agent_mcp_adapter tests/c_api/test_c_api_agent_mcp_adapter.cpp)
-add_executable(test_c_api_agent_mcp_json_adapter tests/c_api/test_c_api_agent_mcp_json_adapter.cpp)
-add_library(test_script_module MODULE tests/jit/test_script_module.cpp)
-set_target_properties(test_script_module PROPERTIES PREFIX "")
-add_library(test_script_cancel_module MODULE tests/jit/test_script_cancel_module.cpp)
-set_target_properties(test_script_cancel_module PROPERTIES PREFIX "")
-add_executable(test_c_api_script_runtime tests/c_api/test_c_api_script_runtime.cpp)
-add_executable(test_c_api_script_timeout tests/c_api/test_c_api_script_timeout.cpp)
-
-foreach(t test_types test_determinism test_ca test_ca_kernels test_registry test_runtime_session test_memory_regime test_custom_allocator test_pool_reclaim test_pool_fragmentation_ab)
-    target_include_directories(${t} PRIVATE include)
-    target_link_libraries(${t} PRIVATE fercuda)
-    target_compile_options(${t} PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_DETERMINISTIC_FLAGS}>
-    )
-    set_target_properties(${t} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+list(LENGTH FERCUDA_CUDA_TESTS FERCUDA_CUDA_TEST_COUNT)
+math(EXPR FERCUDA_CUDA_TEST_LAST "${FERCUDA_CUDA_TEST_COUNT} - 1")
+foreach(idx RANGE 0 ${FERCUDA_CUDA_TEST_LAST} 2)
+    math(EXPR source_idx "${idx} + 1")
+    list(GET FERCUDA_CUDA_TESTS ${idx} target_name)
+    list(GET FERCUDA_CUDA_TESTS ${source_idx} source_path)
+    add_executable(${target_name} ${source_path})
+    target_link_libraries(${target_name} PRIVATE fercuda)
+    fercuda_configure_cuda_target(${target_name})
 endforeach()
 
+add_executable(test_c_api_bridge tests/c_api/test_c_api_bridge.cpp)
 target_include_directories(test_c_api_bridge PRIVATE include)
 target_link_libraries(test_c_api_bridge PRIVATE fercuda_capi)
+
+add_executable(test_c_api_custom_allocator tests/c_api/test_c_api_custom_allocator.cpp)
 target_include_directories(test_c_api_custom_allocator PRIVATE include)
 target_link_libraries(test_c_api_custom_allocator PRIVATE fercuda_capi CUDA::cudart)
+
+add_executable(test_c_api_jit_stub tests/c_api/test_c_api_jit_stub.cpp)
 target_include_directories(test_c_api_jit_stub PRIVATE include)
 target_link_libraries(test_c_api_jit_stub PRIVATE fercuda_capi)
+
+add_executable(test_c_api_jit_exec tests/c_api/test_c_api_jit_exec.cpp)
 target_include_directories(test_c_api_jit_exec PRIVATE include)
 target_link_libraries(test_c_api_jit_exec PRIVATE fercuda_capi)
+
+add_executable(test_c_api_jit_lowering tests/c_api/test_c_api_jit_lowering.cpp)
 target_include_directories(test_c_api_jit_lowering PRIVATE include)
 target_link_libraries(test_c_api_jit_lowering PRIVATE fercuda_capi)
+
+add_executable(test_c_api_jit_intent tests/c_api/test_c_api_jit_intent.cpp)
 target_include_directories(test_c_api_jit_intent PRIVATE include)
 target_link_libraries(test_c_api_jit_intent PRIVATE fercuda_capi)
+
+add_executable(test_c_api_external_ptr_interop tests/c_api/test_c_api_external_ptr_interop.cpp)
 target_include_directories(test_c_api_external_ptr_interop PRIVATE include)
 target_link_libraries(test_c_api_external_ptr_interop PRIVATE fercuda_capi CUDA::cudart)
+
+add_executable(test_c_api_stream_handoff tests/c_api/test_c_api_stream_handoff.cpp)
 target_include_directories(test_c_api_stream_handoff PRIVATE include)
 target_link_libraries(test_c_api_stream_handoff PRIVATE fercuda_capi CUDA::cudart)
+
+add_executable(test_c_api_helper_api tests/c_api/test_c_api_helper_api.cpp)
 target_include_directories(test_c_api_helper_api PRIVATE include)
 target_link_libraries(test_c_api_helper_api PRIVATE fercuda_capi)
+
+add_executable(test_c_api_agent_mcp_adapter tests/c_api/test_c_api_agent_mcp_adapter.cpp)
 target_include_directories(test_c_api_agent_mcp_adapter PRIVATE include)
 target_link_libraries(test_c_api_agent_mcp_adapter PRIVATE fercuda_capi)
+
+add_executable(test_c_api_agent_mcp_json_adapter tests/c_api/test_c_api_agent_mcp_json_adapter.cpp)
 target_include_directories(test_c_api_agent_mcp_json_adapter PRIVATE include)
 target_link_libraries(test_c_api_agent_mcp_json_adapter PRIVATE fercuda_capi)
+
+add_library(test_script_module MODULE tests/jit/test_script_module.cpp)
+set_target_properties(test_script_module PROPERTIES PREFIX "")
 target_include_directories(test_script_module PRIVATE include)
 target_link_libraries(test_script_module PRIVATE fercuda_capi)
+
+add_library(test_script_cancel_module MODULE tests/jit/test_script_cancel_module.cpp)
+set_target_properties(test_script_cancel_module PROPERTIES PREFIX "")
 target_include_directories(test_script_cancel_module PRIVATE include)
 target_link_libraries(test_script_cancel_module PRIVATE fercuda_capi)
+
+add_executable(test_c_api_script_runtime tests/c_api/test_c_api_script_runtime.cpp)
 target_include_directories(test_c_api_script_runtime PRIVATE include)
 target_link_libraries(test_c_api_script_runtime PRIVATE fercuda_capi)
 target_compile_definitions(test_c_api_script_runtime PRIVATE
     TEST_SCRIPT_MODULE_PATH="$<TARGET_FILE:test_script_module>")
+
+add_executable(test_c_api_script_timeout tests/c_api/test_c_api_script_timeout.cpp)
 target_include_directories(test_c_api_script_timeout PRIVATE include)
 target_link_libraries(test_c_api_script_timeout PRIVATE fercuda_capi)
 target_compile_definitions(test_c_api_script_timeout PRIVATE
     TEST_SCRIPT_CANCEL_MODULE_PATH="$<TARGET_FILE:test_script_cancel_module>")
-
-if(TARGET fercuda_intercept)
-    add_executable(test_intercept_compat tests/intercept/test_intercept_compat.cpp)
-    target_include_directories(test_intercept_compat PRIVATE include)
-    target_link_libraries(test_intercept_compat PRIVATE fercuda_intercept CUDA::cudart CUDA::cuda_driver)
-    add_test(NAME test_intercept_compat COMMAND test_intercept_compat)
-
-    add_executable(bench_external_alloc tests/intercept/bench_external_alloc.cu)
-    target_include_directories(bench_external_alloc PRIVATE include)
-    target_link_libraries(bench_external_alloc PRIVATE CUDA::cudart CUDA::cuda_driver dl)
-    set_target_properties(bench_external_alloc PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-endif()
 
 set(FERCUDA_GPU_HOT_INCLUDE_DIR "${FERCUDA_GPU_HOT_ROOT}/include")
 set(FERCUDA_GPU_HOT_LIB "${FERCUDA_GPU_HOT_ROOT}/build/libptx_os_shared.so")
@@ -186,63 +231,24 @@ if(EXISTS "${FERCUDA_GPU_HOT_INCLUDE_DIR}/gpu/gpu_hot_runtime.h" AND EXISTS "${F
     )
 endif()
 
-# ─── Examples ──────────────────────────────────────────────────────────────────
-add_executable(test_sched_minimal     tests/scheduler/test_sched_minimal.cu)
-target_include_directories(test_sched_minimal PRIVATE include)
-target_link_libraries(test_sched_minimal PRIVATE fercuda)
-set_target_properties(test_sched_minimal PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+if(TARGET fercuda_intercept)
+    add_executable(test_intercept_compat tests/intercept/test_intercept_compat.cpp)
+    target_include_directories(test_intercept_compat PRIVATE include)
+    target_link_libraries(test_intercept_compat PRIVATE fercuda_intercept CUDA::cudart CUDA::cuda_driver)
+    add_test(NAME test_intercept_compat COMMAND test_intercept_compat)
 
-add_executable(test_sched_work        tests/scheduler/test_sched_work.cu)
-target_include_directories(test_sched_work PRIVATE include)
-target_link_libraries(test_sched_work PRIVATE fercuda)
-set_target_properties(test_sched_work PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    add_executable(bench_external_alloc tests/intercept/bench_external_alloc.cu)
+    target_include_directories(bench_external_alloc PRIVATE include)
+    target_link_libraries(bench_external_alloc PRIVATE CUDA::cudart CUDA::cuda_driver dl)
+    fercuda_configure_cuda_target(bench_external_alloc)
+endif()
 
-add_executable(test_sched_ops_interop tests/scheduler/test_sched_ops_interop.cu)
-target_include_directories(test_sched_ops_interop PRIVATE include)
-target_link_libraries(test_sched_ops_interop PRIVATE fercuda)
-set_target_properties(test_sched_ops_interop PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-add_executable(test_sched_dma_then_ops tests/scheduler/test_sched_dma_then_ops.cu)
-target_include_directories(test_sched_dma_then_ops PRIVATE include)
-target_link_libraries(test_sched_dma_then_ops PRIVATE fercuda)
-set_target_properties(test_sched_dma_then_ops PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-add_executable(test_sched_pool_interop tests/scheduler/test_sched_pool_interop.cu)
-target_include_directories(test_sched_pool_interop PRIVATE include)
-target_link_libraries(test_sched_pool_interop PRIVATE fercuda)
-set_target_properties(test_sched_pool_interop PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-add_executable(test_sched_smwarp tests/scheduler/test_sched_smwarp.cu)
-target_include_directories(test_sched_smwarp PRIVATE include)
-target_link_libraries(test_sched_smwarp PRIVATE fercuda)
-set_target_properties(test_sched_smwarp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-add_executable(test_h2d_while_sched   tests/h2d/test_h2d_while_sched.cu)
-
-add_executable(test_h2d_simple_loop   tests/h2d/test_h2d_simple_loop.cu)
-target_include_directories(test_h2d_simple_loop PRIVATE include)
-target_link_libraries(test_h2d_simple_loop PRIVATE fercuda)
-set_target_properties(test_h2d_simple_loop PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-add_executable(test_h2d_isolate       tests/h2d/test_h2d_isolate.cu)
-target_include_directories(test_h2d_isolate PRIVATE include)
-target_link_libraries(test_h2d_isolate PRIVATE fercuda)
-set_target_properties(test_h2d_isolate PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_include_directories(test_h2d_while_sched PRIVATE include)
-target_link_libraries(test_h2d_while_sched PRIVATE fercuda)
-set_target_properties(test_h2d_while_sched PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-add_executable(demo_persistent   examples/demo_persistent.cu)
-target_include_directories(demo_persistent PRIVATE include)
+add_executable(demo_persistent examples/demo_persistent.cu)
 target_link_libraries(demo_persistent PRIVATE fercuda)
-target_compile_options(demo_persistent PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_DETERMINISTIC_FLAGS}>
-)
-set_target_properties(demo_persistent PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+fercuda_configure_cuda_target(demo_persistent)
 
-message(STATUS "feRcuda Regime Baseline: ON")
+enable_testing()
 
-# ─── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS fercuda fercuda_capi
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
