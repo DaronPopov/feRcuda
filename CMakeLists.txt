@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(feRcuda LANGUAGES CXX CUDA)
+project(feRcuda LANGUAGES C CXX CUDA)
+
+enable_testing()
 
 find_package(CUDAToolkit REQUIRED)
+find_package(Threads REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,8 +47,13 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     endif()
 endif()
 
-set(FERCUDA_GPU_HOT_ROOT "/home/daron/persistant_gpu_os" CACHE PATH
-    "Path to GPU Hot Runtime project root")
+if(DEFINED ENV{FERCUDA_GPU_HOT_ROOT})
+    set(FERCUDA_GPU_HOT_ROOT "$ENV{FERCUDA_GPU_HOT_ROOT}" CACHE PATH
+        "Path to GPU Hot Runtime project root")
+else()
+    set(FERCUDA_GPU_HOT_ROOT "" CACHE PATH
+        "Path to GPU Hot Runtime project root (set FERCUDA_GPU_HOT_ROOT env var or -DFERCUDA_GPU_HOT_ROOT=...)")
+endif()
 
 # Deterministic math: no fast-math, no implicit FMA fusion.
 set(CUDA_DETERMINISTIC_FLAGS
@@ -55,38 +63,22 @@ set(CUDA_DETERMINISTIC_FLAGS
 )
 
 set(FERCUDA_LIBRARY_SOURCES
-    src/memory/elastic_pool.cu
-    src/scheduler/persistent_scheduler.cu
+    src/runtime/elastic_pool.cu
+    src/runtime/ops_bridge.cu
     src/runtime/regime_manager.cu
     src/runtime/job_manager.cu
     src/runtime/exec_planner.cu
     src/runtime/session.cu
-    src/ops/elementwise.cu
-    src/ops/matmul.cu
-    src/ops/activation.cu
-    src/ops/norm.cu
 )
 
 set(FERCUDA_CUDA_TESTS
     test_types tests/core/test_types.cu
-    test_determinism tests/core/test_determinism.cu
     test_ca tests/experimental/test_ca.cu
     test_ca_kernels tests/experimental/test_ca_kernels.cu
     test_registry tests/runtime/test_registry.cu
     test_runtime_session tests/runtime/test_runtime_session.cu
     test_memory_regime tests/memory/test_memory_regime.cu
     test_custom_allocator tests/memory/test_custom_allocator.cu
-    test_pool_fragmentation_ab tests/memory/test_pool_fragmentation_ab.cu
-    test_pool_reclaim tests/memory/test_pool_reclaim.cu
-    test_sched_dma_then_ops tests/scheduler/test_sched_dma_then_ops.cu
-    test_sched_minimal tests/scheduler/test_sched_minimal.cu
-    test_sched_ops_interop tests/scheduler/test_sched_ops_interop.cu
-    test_sched_pool_interop tests/scheduler/test_sched_pool_interop.cu
-    test_sched_smwarp tests/scheduler/test_sched_smwarp.cu
-    test_sched_work tests/scheduler/test_sched_work.cu
-    test_h2d_isolate tests/h2d/test_h2d_isolate.cu
-    test_h2d_simple_loop tests/h2d/test_h2d_simple_loop.cu
-    test_h2d_while_sched tests/h2d/test_h2d_while_sched.cu
 )
 
 function(fercuda_configure_cuda_target target)
@@ -99,8 +91,15 @@ function(fercuda_configure_cuda_target target)
     )
 endfunction()
 
+function(fercuda_add_smoke_test target)
+    if(TARGET ${target})
+        add_test(NAME ${target} COMMAND ${target})
+    endif()
+endfunction()
+
 add_library(fercuda STATIC ${FERCUDA_LIBRARY_SOURCES})
 target_include_directories(fercuda PUBLIC include)
+target_link_libraries(fercuda PUBLIC ptx_core ptx_kernels)
 target_compile_options(fercuda PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_DETERMINISTIC_FLAGS}>
 )
@@ -109,19 +108,85 @@ set_target_properties(fercuda PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
+# =============================================================================
+# Native PTX-OS core layer (in-tree low-level GPU runtime)
+# =============================================================================
+
+set(PTX_CORE_SOURCES
+    native/core/runtime/hot_runtime.cu
+    native/core/runtime/ptx_stable_runtime.cu
+    native/core/runtime/cuda_alloc_hook.cu
+    native/core/runtime/hot_multi_gpu.cu
+    native/core/memory/tlsf_allocator.cu
+    native/core/memory/elastic_pool.cu
+    native/core/os/vmm.cu
+    native/core/os/vfs.cu
+)
+
+add_library(ptx_core SHARED ${PTX_CORE_SOURCES})
+target_include_directories(ptx_core PUBLIC native/core/include)
+target_include_directories(ptx_core PRIVATE native/core)
+target_link_libraries(ptx_core PUBLIC CUDA::cudart CUDA::cuda_driver)
+target_link_libraries(ptx_core PRIVATE ptx_kernels)
+target_compile_options(ptx_core PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-rdc=true ${CUDA_DETERMINISTIC_FLAGS}>
+)
+set_target_properties(ptx_core PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+)
+
+set(PTX_KERNEL_SOURCES
+    native/core/kernels/tensor_kernels.cu
+    native/core/kernels/tensor_backward.cu
+    native/core/kernels/graphics_kernels.cu
+    native/core/kernels/os_kernel.cu
+)
+
+add_library(ptx_kernels SHARED ${PTX_KERNEL_SOURCES})
+target_include_directories(ptx_kernels PUBLIC native/core/include)
+target_include_directories(ptx_kernels PRIVATE native/core)
+target_link_libraries(ptx_kernels PRIVATE CUDA::cudart)
+target_compile_options(ptx_kernels PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-rdc=true ${CUDA_DETERMINISTIC_FLAGS}>
+)
+set_target_properties(ptx_kernels PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+)
+
+if(UNIX AND NOT APPLE)
+    add_library(ptx_hook SHARED
+        native/core/hooks/cuda_intercept.c
+        native/core/hooks/cuda_context_hook.c
+    )
+    target_include_directories(ptx_hook PRIVATE native/core/include)
+    target_link_libraries(ptx_hook PRIVATE ptx_core CUDA::cudart CUDA::cuda_driver dl)
+    target_compile_definitions(ptx_hook PRIVATE _GNU_SOURCE)
+    set_target_properties(ptx_hook PROPERTIES
+        OUTPUT_NAME ptx_hook
+        POSITION_INDEPENDENT_CODE ON
+        LINKER_LANGUAGE C
+    )
+endif()
+
+# =============================================================================
+# feRcuda C API shared library
+# =============================================================================
+
 add_library(fercuda_capi SHARED
     src/runtime/c_api.cu
     src/runtime/mcp_adapter.cpp
     src/runtime/mcp_json_adapter.cpp
-    src/jit/jit_manager.cu
-    src/jit/script_runtime.cpp
-    src/jit/intent/intent_runtime.cpp
-    src/jit/lowering/capabilities/cuda_caps.cpp
-    src/jit/lowering/capabilities/capability_lowering_pass.cpp
-    src/jit/lowering/fusion/fusion_pass.cpp
-    src/jit/lowering/pipeline/lowering_pipeline.cpp
-    src/jit/lowering/transforms/pragma_parse_pass.cpp
-    src/jit/lowering/transforms/canonicalize_pass.cpp
+    native/core/jit/jit_manager.cu
+    native/core/jit/script_runtime.cpp
+    native/core/jit/intent/intent_runtime.cpp
+    native/core/jit/lowering/capabilities/cuda_caps.cpp
+    native/core/jit/lowering/capabilities/capability_lowering_pass.cpp
+    native/core/jit/lowering/fusion/fusion_pass.cpp
+    native/core/jit/lowering/pipeline/lowering_pipeline.cpp
+    native/core/jit/lowering/transforms/pragma_parse_pass.cpp
+    native/core/jit/lowering/transforms/canonicalize_pass.cpp
 )
 target_include_directories(fercuda_capi PUBLIC include)
 target_link_libraries(fercuda_capi PRIVATE fercuda CUDA::cudart CUDA::cuda_driver CUDA::nvrtc)
@@ -132,16 +197,7 @@ set_target_properties(fercuda_capi PROPERTIES
     OUTPUT_NAME fercuda_capi
 )
 
-if(UNIX AND NOT APPLE)
-    add_library(fercuda_intercept SHARED src/intercept/cuda_alloc_intercept.cpp)
-    target_include_directories(fercuda_intercept PRIVATE include)
-    target_link_libraries(fercuda_intercept PRIVATE CUDA::cudart CUDA::cuda_driver dl)
-    target_compile_definitions(fercuda_intercept PRIVATE _GNU_SOURCE)
-    set_target_properties(fercuda_intercept PROPERTIES
-        OUTPUT_NAME fercuda_intercept
-        POSITION_INDEPENDENT_CODE ON
-    )
-endif()
+# fercuda_intercept removed — use native ptx_hook instead
 
 list(LENGTH FERCUDA_CUDA_TESTS FERCUDA_CUDA_TEST_COUNT)
 math(EXPR FERCUDA_CUDA_TEST_LAST "${FERCUDA_CUDA_TEST_COUNT} - 1")
@@ -229,25 +285,34 @@ if(EXISTS "${FERCUDA_GPU_HOT_INCLUDE_DIR}/gpu/gpu_hot_runtime.h" AND EXISTS "${F
     set_target_properties(test_gpu_hot_runtime_regime PROPERTIES
         BUILD_RPATH "${FERCUDA_GPU_HOT_ROOT}/build"
     )
+    fercuda_add_smoke_test(test_gpu_hot_runtime_regime)
 endif()
 
-if(TARGET fercuda_intercept)
+# Intercept tests now use native ptx_hook
+if(TARGET ptx_hook)
     add_executable(test_intercept_compat tests/intercept/test_intercept_compat.cpp)
-    target_include_directories(test_intercept_compat PRIVATE include)
-    target_link_libraries(test_intercept_compat PRIVATE fercuda_intercept CUDA::cudart CUDA::cuda_driver)
-    add_test(NAME test_intercept_compat COMMAND test_intercept_compat)
+    target_include_directories(test_intercept_compat PRIVATE include native/core/include)
+    target_link_libraries(test_intercept_compat PRIVATE ptx_hook CUDA::cudart CUDA::cuda_driver)
+    fercuda_add_smoke_test(test_intercept_compat)
 
-    add_executable(bench_external_alloc tests/intercept/bench_external_alloc.cu)
-    target_include_directories(bench_external_alloc PRIVATE include)
-    target_link_libraries(bench_external_alloc PRIVATE CUDA::cudart CUDA::cuda_driver dl)
-    fercuda_configure_cuda_target(bench_external_alloc)
+    add_executable(test_intercept_stress tests/intercept/test_intercept_stress.cpp)
+    target_include_directories(test_intercept_stress PRIVATE include native/core/include)
+    target_link_libraries(test_intercept_stress PRIVATE ptx_hook ptx_core ptx_kernels CUDA::cudart Threads::Threads)
+    add_test(NAME test_intercept_stress COMMAND test_intercept_stress)
+    set_tests_properties(test_intercept_stress PROPERTIES TIMEOUT 300)
 endif()
 
-add_executable(demo_persistent examples/demo_persistent.cu)
-target_link_libraries(demo_persistent PRIVATE fercuda)
-fercuda_configure_cuda_target(demo_persistent)
-
-enable_testing()
+fercuda_add_smoke_test(test_c_api_bridge)
+fercuda_add_smoke_test(test_c_api_custom_allocator)
+fercuda_add_smoke_test(test_c_api_external_ptr_interop)
+fercuda_add_smoke_test(test_c_api_helper_api)
+fercuda_add_smoke_test(test_c_api_jit_exec)
+fercuda_add_smoke_test(test_c_api_jit_intent)
+fercuda_add_smoke_test(test_c_api_jit_lowering)
+fercuda_add_smoke_test(test_c_api_jit_stub)
+fercuda_add_smoke_test(test_c_api_script_runtime)
+fercuda_add_smoke_test(test_c_api_script_timeout)
+fercuda_add_smoke_test(test_c_api_stream_handoff)
 
 install(TARGETS fercuda fercuda_capi
     ARCHIVE DESTINATION lib
@@ -255,13 +320,51 @@ install(TARGETS fercuda fercuda_capi
     RUNTIME DESTINATION bin
 )
 
-if(TARGET fercuda_intercept)
-    install(TARGETS fercuda_intercept
-        LIBRARY DESTINATION lib
-        RUNTIME DESTINATION bin
-    )
-endif()
 
 install(DIRECTORY include/
     DESTINATION include
 )
+
+# =============================================================================
+# Native PTX-OS targets install & tests
+# =============================================================================
+
+install(TARGETS ptx_core ptx_kernels
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+)
+
+if(TARGET ptx_hook)
+    install(TARGETS ptx_hook
+        LIBRARY DESTINATION lib
+    )
+endif()
+
+install(DIRECTORY native/core/include/
+    DESTINATION include/ptx
+)
+
+# Native smoke tests
+add_executable(test_ptx_core_init tests/native/test_ptx_core_init.cpp)
+target_include_directories(test_ptx_core_init PRIVATE native/core/include)
+target_link_libraries(test_ptx_core_init PRIVATE ptx_core ptx_kernels CUDA::cudart CUDA::cuda_driver)
+fercuda_add_smoke_test(test_ptx_core_init)
+
+add_executable(test_ptx_tlsf tests/native/test_ptx_tlsf.cpp)
+target_include_directories(test_ptx_tlsf PRIVATE native/core/include)
+target_link_libraries(test_ptx_tlsf PRIVATE ptx_core ptx_kernels CUDA::cudart CUDA::cuda_driver)
+fercuda_add_smoke_test(test_ptx_tlsf)
+
+add_executable(test_ptx_tensor_ops tests/native/test_ptx_tensor_ops.cu)
+target_include_directories(test_ptx_tensor_ops PRIVATE native/core/include)
+target_link_libraries(test_ptx_tensor_ops PRIVATE ptx_core ptx_kernels CUDA::cudart CUDA::cuda_driver)
+target_compile_options(test_ptx_tensor_ops PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-rdc=true>)
+set_target_properties(test_ptx_tensor_ops PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+fercuda_add_smoke_test(test_ptx_tensor_ops)
+
+add_executable(test_ptx_prod_stress tests/native/test_ptx_prod_stress.cu)
+target_include_directories(test_ptx_prod_stress PRIVATE native/core/include)
+target_link_libraries(test_ptx_prod_stress PRIVATE ptx_core ptx_kernels CUDA::cudart CUDA::cuda_driver)
+target_compile_options(test_ptx_prod_stress PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-rdc=true>)
+set_target_properties(test_ptx_prod_stress PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+fercuda_add_smoke_test(test_ptx_prod_stress)

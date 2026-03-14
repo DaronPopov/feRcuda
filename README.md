@@ -1,5 +1,9 @@
 # feR-os (feRcuda)
 
+> **Copyright Daron Popov. All rights reserved.**  \
+> This source is viewable for reference only.  \
+> No license is granted for use, copying, modification, redistribution, sublicensing, or commercial use without prior written permission.
+
 `feR-os` is a deterministic CUDA runtime substrate for GPU-managed execution.
 It gives you a stable control plane to run memory-managed GPU workloads and bridge existing Rust/C/CUDA code onto your regime.
 
@@ -7,10 +11,10 @@ It gives you a stable control plane to run memory-managed GPU workloads and brid
 
 `feR-os` combines:
 - deterministic numeric behavior (no implicit fast-math/fusion drift)
-- reclaimable pool allocation (slab + TLSF path)
-- persistent scheduler execution model
+- O(1) TLSF pool allocation (native PTX-OS layer)
+- ElasticPool delegation to native GPU runtime
 - C API surface for language/runtime adapters
-- optional CUDA allocation interception for regime handoff
+- optional CUDA allocation interception via `libptx_hook.so` (LD_PRELOAD)
 
 This repo is the implementation and installer for that runtime layer.
 
@@ -90,17 +94,12 @@ If needed at runtime:
 export LD_LIBRARY_PATH="$HOME/.local/lib:${LD_LIBRARY_PATH:-}"
 ```
 
-Interception compatibility env knobs:
-- `FERCUDA_GPU_HOT_SO=/absolute/path/to/libptx_os_shared.so`
-- `FERCUDA_GPU_HOT_SO_PATHS=/path/a.so:/path/b.so:/path/c.so`
-- `FERCUDA_INTERCEPT_ENABLE=1` (or `0` to force pure CUDA fallback)
-- `FERCUDA_INTERCEPT_MODE=permissive|strict` (default: `permissive`)
-- `FERCUDA_INTERCEPT_REGIME=tlsf|regime2|segv2` (default: `tlsf`)
-- `FERCUDA_INTERCEPT_ASYNC_REGIME=1` to route async alloc APIs through active regime path
-- `FERCUDA_INTERCEPT_ASYNC_TLSF=1` legacy alias for async regime routing
-- `FERCUDA_INTERCEPT_DLCLOSE=1` to close shared libs on shutdown (default keeps handles open for safer teardown ordering)
-
-If async CUDA APIs are unavailable on a target runtime, the intercept layer now degrades to sync CUDA alloc/free fallback instead of hard failure.
+Interception (LD_PRELOAD `libptx_hook.so`):
+- `PTX_HOOK_VERBOSE=1` — print allocation/free info
+- `PTX_HOOK_DEVICE=0` — CUDA device ID (default: 0)
+- `PTX_HOOK_DISABLE=1` — disable hook
+- `PTX_HOOK_MODE=tlsf|cuda|hybrid` — allocator mode (default: `tlsf`)
+- `PTX_HOOK_HYBRID_FALLBACK=1` — allow TLSF alloc to fall back to CUDA (hybrid mode only)
 
 ### Cache Trimming
 
@@ -119,14 +118,15 @@ bash scripts/trim_cache.sh --global-cargo --feros-state
 
 ## Rust Layer
 
-- `rust/fercuda-ffi` (C API bridge)
-- `rust/deps/fercuda-ml-lite`
-- `rust/deps/fercuda-math`
-- `rust/deps/fercuda-vision-lite`
+- `rust/fercuda-ffi` — C API bridge
+- `rust/deps/ptx-os` — PTX-OS FFI (TLSF, streams, runtime)
+- `rust/deps/cudarc-ptx` — CUDA driver wrapper with PTX-OS integration
+- `rust/deps/candle-ptx-os` — Candle ML backend on PTX-OS
+- `rust/deps/fercuda-ml-lite`, `fercuda-math`, `fercuda-vision-lite`
 
 ## Compatibility Test Harness
 
-Intercept compatibility smoke test target:
+Intercept compatibility smoke test (verifies `libptx_hook.so` ABI):
 
 ```bash
 cmake -S . -B build
@@ -134,40 +134,34 @@ cmake --build build -j"$(nproc)" --target test_intercept_compat
 ctest --test-dir build --output-on-failure -R test_intercept_compat
 ```
 
-This test exercises:
-- permissive mode fallback paths
-- managed/host/pitch API telemetry accounting
-- strict mode rejection path in a subprocess
+Native layer tests (TLSF, tensor ops, production stress):
+
+```bash
+ctest --test-dir build --output-on-failure -R "test_ptx_|test_intercept"
+```
 
 ## External Runtime Benchmark
 
-Compare external CUDA alloc/free workload in:
-- native mode
-- `feR-os` intercept/runtime mode (`LD_PRELOAD`)
+To compare CUDA alloc/free in native vs TLSF intercept mode:
 
 ```bash
-bash scripts/benchmark_external_runtime.sh --iters 20000 --bytes 65536
-bash scripts/benchmark_external_runtime.sh --iters 20000 --bytes 65536 --regime sizeclass
+# Build
+cmake -S . -B build && cmake --build build -j"$(nproc)"
+
+# Run with TLSF intercept
+LD_PRELOAD=./build/libptx_hook.so your_cuda_app
 ```
 
-Optional:
-
-```bash
-# Async alloc API path
-bash scripts/benchmark_external_runtime.sh --iters 20000 --bytes 65536 --async --async-tlsf --regime sizeclass
-
-# Explicit GPU hot runtime shared library
-bash scripts/benchmark_external_runtime.sh --gpu-hot-so /path/to/libptx_os_shared.so
-```
+The intercept library `libptx_hook.so` redirects `cudaMalloc`/`cudaFree` through the PTX-OS TLSF allocator. See `native/core/hooks/cuda_intercept.c` for implementation.
 
 ## Repository Layout
 
-- `include/` public headers
-- `src/` CUDA/C++ runtime
-- `tests/` runtime and integration tests
-- `examples/` usage demos
-- `rust/` Rust adapters/deps
-- `scripts/install.sh` managed installer
+- `include/` — public headers (fercuda, ptx)
+- `native/core/` — PTX-OS layer (TLSF, hot runtime, tensor kernels, JIT, hooks)
+- `src/` — feRcuda runtime (session, ElasticPool, regime, MCP adapter)
+- `tests/` — runtime, C API, intercept, native tests
+- `rust/` — Rust adapters (fercuda-ffi, ptx-os, cudarc-ptx, candle-ptx-os)
+- `scripts/install.sh` — managed bootstrap installer
 
 ## Agent Control Plane Design
 

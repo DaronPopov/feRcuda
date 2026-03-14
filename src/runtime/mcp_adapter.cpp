@@ -1,8 +1,10 @@
 #include "fercuda/agent/mcp_adapter.h"
 
+#include "fercuda/jit/api.h"
 #include "fercuda/jit/intent/intent.h"
 
 #include <atomic>
+#include <chrono>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -54,17 +56,47 @@ struct JobRecord {
 
 }  // namespace
 
+struct ProgramRecord {
+    uint64_t session_id = 0;
+    fer_jit_program_t handle = nullptr;
+};
+
 struct fer_agent_adapter {
     std::mutex mu;
     std::atomic<uint64_t> next_session_id{1};
     std::atomic<uint64_t> next_tensor_id{1};
     std::atomic<uint64_t> next_blob_id{1};
+    std::atomic<uint64_t> next_program_id{1};
 
     std::unordered_map<uint64_t, fer_session_t*> sessions;
     std::unordered_map<uint64_t, TensorRecord> tensors;
     std::unordered_map<uint64_t, JobRecord> jobs;
+    std::unordered_map<uint64_t, ProgramRecord> programs;
     std::unordered_map<std::string, std::vector<uint8_t>> blobs;
+
+    fer_agent_progress_callback_fn progress_cb = nullptr;
+    void* progress_ctx = nullptr;
 };
+
+static uint64_t now_us() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+static void emit_progress(fer_agent_adapter* adapter, uint32_t kind,
+                          uint64_t session_id, uint64_t entity_id,
+                          float fraction, const char* message) {
+    if (!adapter || !adapter->progress_cb) return;
+    fer_agent_progress_event_t ev{};
+    ev.kind = kind;
+    ev.session_id = session_id;
+    ev.entity_id = entity_id;
+    ev.timestamp_us = now_us();
+    ev.fraction = fraction;
+    ev.message = message;
+    adapter->progress_cb(&ev, adapter->progress_ctx);
+}
 
 extern "C" fer_status_t fer_agent_adapter_create(fer_agent_adapter_t** out_adapter) {
     if (!out_adapter) return invalid("out_adapter is null");
@@ -88,6 +120,13 @@ extern "C" fer_status_t fer_agent_adapter_destroy(fer_agent_adapter_t* adapter) 
         }
     }
     adapter->tensors.clear();
+    for (auto& kv : adapter->programs) {
+        const auto sit = adapter->sessions.find(kv.second.session_id);
+        if (sit != adapter->sessions.end()) {
+            (void)fer_jit_release_program(sit->second, kv.second.handle);
+        }
+    }
+    adapter->programs.clear();
     adapter->jobs.clear();
     for (auto& kv : adapter->sessions) {
         (void)fer_session_destroy(kv.second);
@@ -225,13 +264,22 @@ extern "C" fer_status_t fer_agent_tensor_copy(
         record = tit->second;
     }
 
+    emit_progress(adapter, FER_AGENT_PROGRESS_TENSOR_COPY_START,
+                  req->session_id, req->tensor_id, 0.0f, "tensor copy started");
+
+    fer_status_t st;
     if (req->direction == FER_AGENT_COPY_HOST_TO_DEVICE) {
-        return fer_tensor_upload(session, record.handle, req->host_ptr, bytes);
+        st = fer_tensor_upload(session, record.handle, req->host_ptr, bytes);
+    } else if (req->direction == FER_AGENT_COPY_DEVICE_TO_HOST) {
+        st = fer_tensor_download(session, record.handle, req->host_ptr, bytes);
+    } else {
+        return invalid("invalid copy direction");
     }
-    if (req->direction == FER_AGENT_COPY_DEVICE_TO_HOST) {
-        return fer_tensor_download(session, record.handle, req->host_ptr, bytes);
-    }
-    return invalid("invalid copy direction");
+
+    emit_progress(adapter, FER_AGENT_PROGRESS_TENSOR_COPY_DONE,
+                  req->session_id, req->tensor_id, 1.0f,
+                  st.code == FER_STATUS_OK ? "tensor copy done" : "tensor copy failed");
+    return st;
 }
 
 extern "C" fer_status_t fer_agent_tensor_release(
@@ -359,6 +407,8 @@ extern "C" fer_status_t fer_agent_job_wait(
         std::lock_guard<std::mutex> lock(adapter->mu);
         adapter->jobs.erase(job_id);
     }
+    emit_progress(adapter, FER_AGENT_PROGRESS_JOB_COMPLETE,
+                  session_id, job_id, 1.0f, "job complete");
     return ok_status();
 }
 
@@ -464,6 +514,286 @@ extern "C" fer_status_t fer_agent_session_stats(
     *out_job_count = job_count;
     return ok_status();
 }
+
+// --- Generic intent runner ---------------------------------------------------
+
+extern "C" fer_status_t fer_agent_jit_intent_run(
+    fer_agent_adapter_t* adapter,
+    const fer_agent_intent_generic_request_t* req,
+    uint64_t* out_job_id) {
+    if (!adapter) return invalid("adapter is null");
+    if (!req) return invalid("req is null");
+    if (!out_job_id) return invalid("out_job_id is null");
+
+    fer_session_t* session = nullptr;
+    TensorRecord in_rec{}, out_rec{};
+    TensorRecord weights_rec{}, bias_rec{};
+    bool has_weights = (req->weights_tensor_id != 0);
+    bool has_bias = (req->bias_tensor_id != 0);
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        auto sit = adapter->sessions.find(req->session_id);
+        if (sit == adapter->sessions.end()) return not_found("session_id not found");
+        session = sit->second;
+        auto in_it = adapter->tensors.find(req->input_tensor_id);
+        auto out_it = adapter->tensors.find(req->output_tensor_id);
+        if (in_it == adapter->tensors.end()) return not_found("input_tensor_id not found");
+        if (out_it == adapter->tensors.end()) return not_found("output_tensor_id not found");
+        if (in_it->second.session_id != req->session_id || out_it->second.session_id != req->session_id)
+            return invalid("tensor/session mismatch");
+        in_rec = in_it->second;
+        out_rec = out_it->second;
+        if (has_weights) {
+            auto wit = adapter->tensors.find(req->weights_tensor_id);
+            if (wit == adapter->tensors.end()) return not_found("weights_tensor_id not found");
+            weights_rec = wit->second;
+        }
+        if (has_bias) {
+            auto bit = adapter->tensors.find(req->bias_tensor_id);
+            if (bit == adapter->tensors.end()) return not_found("bias_tensor_id not found");
+            bias_rec = bit->second;
+        }
+    }
+
+    fer_jit_intent_t intent{};
+    intent.abi_version = FER_JIT_INTENT_ABI_VERSION;
+    intent.op = req->op;
+    intent.fusion_mask = req->fusion_mask;
+    intent.caps_mask = req->caps_mask;
+    intent.memory_regime = req->memory_regime;
+    intent.n = req->n;
+    intent.alpha = req->alpha;
+    intent.beta = req->beta;
+    intent.height = req->height;
+    intent.width = req->width;
+    intent.channels = req->channels;
+    intent.kernel_h = req->kernel_h;
+    intent.kernel_w = req->kernel_w;
+    intent.pad_h = req->pad_h;
+    intent.pad_w = req->pad_w;
+    intent.stride_h = req->stride_h;
+    intent.stride_w = req->stride_w;
+    intent.num_filters = req->num_filters;
+
+    fer_jit_intent_bindings_t bindings{};
+    bindings.input = in_rec.handle.id;
+    bindings.output = out_rec.handle.id;
+    bindings.weights = has_weights ? weights_rec.handle.id : 0;
+    bindings.bias = has_bias ? bias_rec.handle.id : 0;
+
+    uint64_t job_id = 0;
+    fer_status_t st = fer_jit_run_intent(session, &intent, &bindings, &job_id);
+    if (st.code != FER_STATUS_OK) return st;
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        adapter->jobs[job_id] = JobRecord{req->session_id};
+    }
+    *out_job_id = job_id;
+    return ok_status();
+}
+
+// --- Progress callback ------------------------------------------------------
+
+extern "C" fer_status_t fer_agent_set_progress_callback(
+    fer_agent_adapter_t* adapter,
+    fer_agent_progress_callback_fn callback,
+    void* user_ctx) {
+    if (!adapter) return invalid("adapter is null");
+    std::lock_guard<std::mutex> lock(adapter->mu);
+    adapter->progress_cb = callback;
+    adapter->progress_ctx = user_ctx;
+    return ok_status();
+}
+
+// --- JIT kernel compile/launch ----------------------------------------------
+
+extern "C" fer_status_t fer_agent_jit_compile(
+    fer_agent_adapter_t* adapter,
+    const fer_agent_jit_compile_request_t* req,
+    fer_agent_jit_compile_result_t* out_result) {
+    if (!adapter) return invalid("adapter is null");
+    if (!req) return invalid("req is null");
+    if (!out_result) return invalid("out_result is null");
+    if (!req->source || req->source_len == 0) return invalid("source is empty");
+
+    fer_session_t* session = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        auto sit = adapter->sessions.find(req->session_id);
+        if (sit == adapter->sessions.end()) return not_found("session_id not found");
+        session = sit->second;
+    }
+
+    emit_progress(adapter, FER_AGENT_PROGRESS_JIT_COMPILE_START,
+                  req->session_id, 0, 0.0f, "compile started");
+
+    fer_jit_source_t source{};
+    source.kind = req->language;
+    source.code = req->source;
+    source.code_len = req->source_len;
+
+    fer_jit_options_t options{};
+    options.backend = FER_JIT_BACKEND_NVRTC;
+    options.mode = req->strict ? FER_JIT_MODE_STRICT : FER_JIT_MODE_PERMISSIVE;
+    options.enable_disk_cache = 1;
+    options.cache_dir = "/tmp/fercuda_jit_cache_agent";
+
+    fer_jit_program_t program = nullptr;
+    fer_jit_compile_result_t cr{};
+    fer_status_t st = fer_jit_compile(session, &source, &options, &program, &cr);
+    if (st.code != FER_STATUS_OK || !program) {
+        out_result->diagnostics_log = cr.log;
+        emit_progress(adapter, FER_AGENT_PROGRESS_JIT_COMPILE_DONE,
+                      req->session_id, 0, 1.0f, "compile failed");
+        return st.code == FER_STATUS_OK
+            ? fer_status_t{FER_STATUS_INTERNAL_ERROR, "compile returned null program"}
+            : st;
+    }
+
+    const uint64_t program_id = adapter->next_program_id.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        adapter->programs[program_id] = ProgramRecord{req->session_id, program};
+    }
+    out_result->program_id = program_id;
+    out_result->cache_hit = cr.cache_hit;
+    out_result->diagnostics_log = cr.log;
+
+    emit_progress(adapter, FER_AGENT_PROGRESS_JIT_COMPILE_DONE,
+                  req->session_id, program_id, 1.0f,
+                  cr.cache_hit ? "compile done (cache hit)" : "compile done");
+    return ok_status();
+}
+
+extern "C" fer_status_t fer_agent_jit_launch(
+    fer_agent_adapter_t* adapter,
+    const fer_agent_jit_launch_request_t* req,
+    uint64_t* out_job_id) {
+    if (!adapter) return invalid("adapter is null");
+    if (!req) return invalid("req is null");
+    if (!out_job_id) return invalid("out_job_id is null");
+    if (!req->kernel_name) return invalid("kernel_name is null");
+
+    fer_session_t* session = nullptr;
+    fer_jit_program_t program = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        auto sit = adapter->sessions.find(req->session_id);
+        if (sit == adapter->sessions.end()) return not_found("session_id not found");
+        session = sit->second;
+        auto pit = adapter->programs.find(req->program_id);
+        if (pit == adapter->programs.end()) return not_found("program_id not found");
+        if (pit->second.session_id != req->session_id) return invalid("program/session mismatch");
+        program = pit->second.handle;
+    }
+
+    emit_progress(adapter, FER_AGENT_PROGRESS_JIT_LAUNCH_START,
+                  req->session_id, req->program_id, 0.0f, "launch started");
+
+    // Build arg descriptors and values from the launch args
+    std::vector<fer_jit_arg_desc_t> descs(req->arg_count);
+    std::vector<fer_jit_arg_value_t> vals(req->arg_count);
+
+    for (size_t i = 0; i < req->arg_count; ++i) {
+        const fer_agent_jit_launch_arg_t& la = req->args[i];
+        descs[i].kind = la.kind;
+        descs[i].expected_dtype = FER_JIT_WILDCARD_U32;
+        descs[i].expected_rank = FER_JIT_WILDCARD_U32;
+        descs[i].expected_bytes = FER_JIT_WILDCARD_U64;
+        for (int d = 0; d < 4; ++d) descs[i].expected_dims[d] = FER_JIT_WILDCARD_U32;
+
+        vals[i].kind = la.kind;
+        if (la.kind == FER_JIT_ARG_BUFFER) {
+            descs[i].access = la.access;
+            TensorRecord rec{};
+            {
+                std::lock_guard<std::mutex> lock(adapter->mu);
+                auto tit = adapter->tensors.find(la.tensor_id);
+                if (tit == adapter->tensors.end()) return not_found("tensor_id not found in launch args");
+                if (tit->second.session_id != req->session_id) return invalid("tensor/session mismatch in launch args");
+                rec = tit->second;
+            }
+            vals[i].as.buffer_id = rec.handle.id;
+        } else {
+            switch (la.kind) {
+                case FER_JIT_ARG_SCALAR_F32: vals[i].as.f32 = la.scalar.f32; break;
+                case FER_JIT_ARG_SCALAR_F64: vals[i].as.f64 = la.scalar.f64; break;
+                case FER_JIT_ARG_SCALAR_I32: vals[i].as.i32 = la.scalar.i32; break;
+                case FER_JIT_ARG_SCALAR_U32: vals[i].as.u32 = la.scalar.u32; break;
+                case FER_JIT_ARG_SCALAR_I64: vals[i].as.i64 = la.scalar.i64; break;
+                case FER_JIT_ARG_SCALAR_U64: vals[i].as.u64 = la.scalar.u64; break;
+                default: return invalid("unsupported arg kind in launch args");
+            }
+        }
+    }
+
+    fer_jit_kernel_sig_t sig{};
+    sig.args = descs.empty() ? nullptr : descs.data();
+    sig.arg_count = descs.size();
+
+    fer_jit_kernel_t kernel = nullptr;
+    fer_status_t st = fer_jit_get_kernel(session, program, req->kernel_name, &sig, &kernel);
+    if (st.code != FER_STATUS_OK || !kernel) {
+        emit_progress(adapter, FER_AGENT_PROGRESS_JIT_LAUNCH_DONE,
+                      req->session_id, req->program_id, 1.0f, "launch failed: kernel not found");
+        return st.code == FER_STATUS_OK
+            ? fer_status_t{FER_STATUS_INTERNAL_ERROR, "get_kernel returned null"}
+            : st;
+    }
+
+    fer_jit_arg_pack_t pack{};
+    pack.args = vals.empty() ? nullptr : vals.data();
+    pack.arg_count = vals.size();
+
+    fer_jit_launch_cfg_t cfg{};
+    cfg.grid_x = req->grid[0]; cfg.grid_y = req->grid[1]; cfg.grid_z = req->grid[2];
+    cfg.block_x = req->block[0]; cfg.block_y = req->block[1]; cfg.block_z = req->block[2];
+    cfg.shared_mem_bytes = req->shared_mem_bytes;
+    cfg.memory_regime = 0xFFFFFFFFu;  // allow any regime
+
+    uint64_t job_id = 0;
+    st = fer_jit_launch(session, kernel, &cfg, &pack, &job_id);
+    fer_jit_release_kernel(session, kernel);
+
+    if (st.code != FER_STATUS_OK) {
+        emit_progress(adapter, FER_AGENT_PROGRESS_JIT_LAUNCH_DONE,
+                      req->session_id, req->program_id, 1.0f, "launch failed");
+        return st;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        adapter->jobs[job_id] = JobRecord{req->session_id};
+    }
+    *out_job_id = job_id;
+
+    emit_progress(adapter, FER_AGENT_PROGRESS_JIT_LAUNCH_DONE,
+                  req->session_id, job_id, 1.0f, "launch submitted");
+    return ok_status();
+}
+
+extern "C" fer_status_t fer_agent_jit_release_program(
+    fer_agent_adapter_t* adapter,
+    uint64_t session_id,
+    uint64_t program_id) {
+    if (!adapter) return invalid("adapter is null");
+    fer_session_t* session = nullptr;
+    fer_jit_program_t program = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(adapter->mu);
+        auto sit = adapter->sessions.find(session_id);
+        if (sit == adapter->sessions.end()) return not_found("session_id not found");
+        session = sit->second;
+        auto pit = adapter->programs.find(program_id);
+        if (pit == adapter->programs.end()) return not_found("program_id not found");
+        if (pit->second.session_id != session_id) return invalid("program/session mismatch");
+        program = pit->second.handle;
+        adapter->programs.erase(pit);
+    }
+    return fer_jit_release_program(session, program);
+}
+
+// --- Blob store -------------------------------------------------------------
 
 extern "C" fer_status_t fer_agent_blob_put(
     fer_agent_adapter_t* adapter,

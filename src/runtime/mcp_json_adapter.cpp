@@ -1,6 +1,7 @@
 #include "fercuda/agent/mcp_json_adapter.h"
 
 #include "fercuda/jit/intent/intent.h"
+#include "fercuda/jit/types.h"
 
 #include <algorithm>
 #include <chrono>
@@ -550,17 +551,22 @@ extern "C" fer_status_t fer_agent_mcp_dispatch(
         fer_agent_runtime_inspect_t info{};
         fer_status_t st = fer_agent_runtime_inspect(adapter, &info);
         if (st.code != FER_STATUS_OK) return write_error(out_json, out_json_len, st);
-        char payload[256];
+        char payload[768];
         if (!writef(
                 payload, sizeof(payload),
                 "{\"agent_api_version\":\"v1alpha1\",\"jit_intent_abi_version\":%u,"
                 "\"supports\":{\"jit_compile\":%s,\"jit_intent\":%s,"
-                "\"external_ptr_import\":%s,\"session_stream_handoff\":%s}}",
+                "\"external_ptr_import\":%s,\"session_stream_handoff\":%s,"
+                "\"jit_kernel_compile\":%s,\"jit_kernel_launch\":%s,"
+                "\"progress_channel\":%s},"
+                "\"intent_ops\":[\"affine_f32\",\"softmax_f32\","
+                "\"reduce_sum_f32\",\"reduce_max_f32\",\"conv2d_f32\"]}",
                 info.jit_intent_abi_version,
                 info.supports_jit_compile ? "true" : "false",
                 info.supports_jit_intent ? "true" : "false",
                 info.supports_external_ptr_import ? "true" : "false",
-                info.supports_session_stream_handoff ? "true" : "false")) {
+                info.supports_session_stream_handoff ? "true" : "false",
+                "true", "true", "true")) {
             return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INTERNAL_ERROR, "payload format failed"});
         }
         return write_ok(out_json, out_json_len, payload);
@@ -811,62 +817,206 @@ extern "C" fer_status_t fer_agent_mcp_dispatch(
         return write_ok(out_json, out_json_len, payload.data());
     }
 
+    if (std::strcmp(tool_name, "fer.jit.kernel.compile") == 0) {
+        uint64_t session_id = 0;
+        std::string source_code;
+        std::string language;
+        uint64_t opt_level = 2;
+        bool strict = true;
+        if (!parse_u64(json, "session_id", &session_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing session_id"});
+        if (!parse_string(json, "source", &source_code)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing source"});
+        if (!parse_string(json, "language", &language)) language = "cuda";
+        (void)parse_u64(json, "optimization_level", &opt_level);
+        (void)parse_bool(json, "strict", &strict);
+        uint32_t lang_kind = FER_JIT_SOURCE_CUDA;
+        if (language == "ptx") lang_kind = FER_JIT_SOURCE_PTX;
+        else if (language != "cuda") return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "unsupported language"});
+        fer_agent_jit_compile_request_t req{};
+        req.session_id = session_id;
+        req.source = source_code.c_str();
+        req.source_len = source_code.size();
+        req.language = lang_kind;
+        req.optimization_level = static_cast<uint32_t>(opt_level);
+        req.strict = strict ? 1u : 0u;
+        fer_agent_jit_compile_result_t cr{};
+        fer_status_t st = fer_agent_jit_compile(adapter, &req, &cr);
+        if (st.code != FER_STATUS_OK) return write_error(out_json, out_json_len, st);
+        std::string log_escaped = escape_json(cr.diagnostics_log ? cr.diagnostics_log : "");
+        std::vector<char> payload(log_escaped.size() + 256);
+        if (!writef(payload.data(), payload.size(),
+                    "{\"program_id\":%llu,\"cache\":{\"hit\":%s},\"diagnostics\":{\"warnings\":[],\"errors\":[],\"log\":\"%s\"}}",
+                    static_cast<unsigned long long>(cr.program_id),
+                    cr.cache_hit ? "true" : "false",
+                    log_escaped.c_str())) {
+            return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INTERNAL_ERROR, "payload format failed"});
+        }
+        return write_ok(out_json, out_json_len, payload.data());
+    }
+
+    if (std::strcmp(tool_name, "fer.jit.kernel.launch") == 0) {
+        uint64_t session_id = 0;
+        uint64_t program_id = 0;
+        std::string kernel_name;
+        std::vector<uint32_t> grid;
+        std::vector<uint32_t> block;
+        uint64_t shared_mem = 0;
+        if (!parse_u64(json, "session_id", &session_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing session_id"});
+        if (!parse_u64(json, "program_id", &program_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing program_id"});
+        if (!parse_string(json, "kernel_name", &kernel_name)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing kernel_name"});
+        if (!parse_u32_array(json, "grid", &grid) || grid.size() != 3) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "grid must be [x,y,z]"});
+        if (!parse_u32_array(json, "block", &block) || block.size() != 3) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "block must be [x,y,z]"});
+        (void)parse_u64(json, "shared_mem_bytes", &shared_mem);
+        // Parse args array - simplified inline JSON args parser
+        // For now require args to be pre-resolved tensor_ids and typed scalars
+        // via the structured C API. JSON-level arg parsing deferred to full schema.
+        std::string reason;
+        if (!policy_try_begin_job(policy, session_id, &reason)) {
+            t_audit_policy_decision = "deny";
+            std::string msg = std::string(kResourceExhaustedPrefix) + reason;
+            return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, msg.c_str()});
+        }
+        fer_agent_jit_launch_request_t req{};
+        req.session_id = session_id;
+        req.program_id = program_id;
+        req.kernel_name = kernel_name.c_str();
+        req.grid[0] = grid[0]; req.grid[1] = grid[1]; req.grid[2] = grid[2];
+        req.block[0] = block[0]; req.block[1] = block[1]; req.block[2] = block[2];
+        req.shared_mem_bytes = static_cast<uint32_t>(shared_mem);
+        req.args = nullptr;
+        req.arg_count = 0;
+        uint64_t job_id = 0;
+        fer_status_t st = fer_agent_jit_launch(adapter, &req, &job_id);
+        if (st.code != FER_STATUS_OK) {
+            policy_end_job(session_id);
+            return write_error(out_json, out_json_len, st);
+        }
+        char payload[128];
+        if (!writef(payload, sizeof(payload), "{\"job_id\":%llu}", static_cast<unsigned long long>(job_id))) {
+            return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INTERNAL_ERROR, "payload format failed"});
+        }
+        return write_ok(out_json, out_json_len, payload);
+    }
+
+    if (std::strcmp(tool_name, "fer.jit.kernel.release") == 0) {
+        uint64_t session_id = 0;
+        uint64_t program_id = 0;
+        if (!parse_u64(json, "session_id", &session_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing session_id"});
+        if (!parse_u64(json, "program_id", &program_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing program_id"});
+        fer_status_t st = fer_agent_jit_release_program(adapter, session_id, program_id);
+        if (st.code != FER_STATUS_OK) return write_error(out_json, out_json_len, st);
+        return write_ok(out_json, out_json_len, "{\"released\":true}");
+    }
+
     if (std::strcmp(tool_name, "fer.jit.intent.run") == 0) {
-        fer_agent_intent_affine_f32_request_t req{};
         std::string op;
         std::string regime;
         std::vector<std::string> fusion;
         std::vector<std::string> caps;
-        double alpha = 0.0;
-        double beta = 0.0;
+        uint64_t session_id = 0;
+        double alpha = 0.0, beta = 0.0;
         uint64_t tmp = 0;
-        if (!parse_u64(json, "session_id", &req.session_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing session_id"});
+        if (!parse_u64(json, "session_id", &session_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing session_id"});
         if (!parse_string(json, "op", &op)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing op"});
-        if (op != "affine_f32") return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "only affine_f32 supported"});
-        if (!parse_u64(json, "n", &tmp)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing n"});
-        req.n = static_cast<uint32_t>(tmp);
-        if (!parse_double(json, "alpha", &alpha)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing alpha"});
-        if (!parse_double(json, "beta", &beta)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing beta"});
-        req.alpha = static_cast<float>(alpha);
-        req.beta = static_cast<float>(beta);
         if (!parse_string(json, "memory_regime", &regime)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing memory_regime"});
         if (!list_allows(policy.allow_regimes, regime)) {
             t_audit_policy_decision = "deny";
             return write_error(out_json, out_json_len, fer_status_t{
                 FER_STATUS_INVALID_ARGUMENT, "POLICY_DENIED: memory_regime is not allowed"});
         }
-        req.memory_regime = regime_from_string(regime);
-        if (req.memory_regime == UINT32_MAX) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "invalid memory_regime"});
-        req.fusion_mask = 0;
+        const uint32_t regime_id = regime_from_string(regime);
+        if (regime_id == UINT32_MAX) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "invalid memory_regime"});
+
+        uint32_t fusion_mask = 0;
         if (parse_string_array(json, "fusion_mask", &fusion)) {
             for (const std::string& f : fusion) {
-                if (f == "relu") req.fusion_mask |= FER_JIT_INTENT_FUSION_RELU;
-                else if (f == "none") {}
-                else return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "invalid fusion op"});
+                if (f == "relu") fusion_mask |= FER_JIT_INTENT_FUSION_RELU;
+                else if (f != "none") return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "invalid fusion op"});
             }
         }
-        req.caps_mask = 0;
+        uint32_t caps_mask = 0;
         if (parse_string_array(json, "caps_mask", &caps)) {
             for (const std::string& c : caps) {
-                if (c == "require_tensor_cores") req.caps_mask |= FER_JIT_INTENT_CAPS_REQUIRE_TENSOR_CORES;
-                else if (c == "require_coop_groups") req.caps_mask |= FER_JIT_INTENT_CAPS_REQUIRE_COOP_GROUPS;
-                else if (c == "none") {}
-                else return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "invalid caps op"});
+                if (c == "require_tensor_cores") caps_mask |= FER_JIT_INTENT_CAPS_REQUIRE_TENSOR_CORES;
+                else if (c == "require_coop_groups") caps_mask |= FER_JIT_INTENT_CAPS_REQUIRE_COOP_GROUPS;
+                else if (c != "none") return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "invalid caps op"});
             }
         }
-        if (!parse_u64(json, "input", &req.input_tensor_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing bindings.input"});
-        if (!parse_u64(json, "output", &req.output_tensor_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing bindings.output"});
+
+        // Map op string to enum
+        uint32_t op_enum;
+        if (op == "affine_f32") op_enum = FER_JIT_INTENT_OP_AFFINE_F32;
+        else if (op == "softmax_f32") op_enum = FER_JIT_INTENT_OP_SOFTMAX_F32;
+        else if (op == "reduce_sum_f32") op_enum = FER_JIT_INTENT_OP_REDUCE_SUM_F32;
+        else if (op == "reduce_max_f32") op_enum = FER_JIT_INTENT_OP_REDUCE_MAX_F32;
+        else if (op == "conv2d_f32") op_enum = FER_JIT_INTENT_OP_CONV2D_F32;
+        else return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "unsupported op"});
+
+        // Common fields
+        fer_agent_intent_affine_f32_request_t req{};
+        req.session_id = session_id;
+        req.memory_regime = regime_id;
+        req.fusion_mask = fusion_mask;
+        req.caps_mask = caps_mask;
+        if (parse_u64(json, "n", &tmp)) req.n = static_cast<uint32_t>(tmp);
+        (void)parse_double(json, "alpha", &alpha); req.alpha = static_cast<float>(alpha);
+        (void)parse_double(json, "beta", &beta); req.beta = static_cast<float>(beta);
+
+        uint64_t input_id = 0, output_id = 0;
+        if (!parse_u64(json, "input", &input_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing bindings.input"});
+        if (!parse_u64(json, "output", &output_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing bindings.output"});
+        req.input_tensor_id = input_id;
+        req.output_tensor_id = output_id;
+
         std::string reason;
-        if (!policy_try_begin_job(policy, req.session_id, &reason)) {
+        if (!policy_try_begin_job(policy, session_id, &reason)) {
             t_audit_policy_decision = "deny";
             std::string msg = std::string(kResourceExhaustedPrefix) + reason;
             return write_error(out_json, out_json_len, fer_status_t{
                 FER_STATUS_INVALID_ARGUMENT, msg.c_str()});
         }
+
         uint64_t job_id = 0;
-        fer_status_t st = fer_agent_jit_intent_run_affine_f32(adapter, &req, &job_id);
+        fer_status_t st;
+
+        if (op_enum == FER_JIT_INTENT_OP_AFFINE_F32) {
+            st = fer_agent_jit_intent_run_affine_f32(adapter, &req, &job_id);
+        } else {
+            fer_agent_intent_generic_request_t gen{};
+            gen.session_id = session_id;
+            gen.op = op_enum;
+            gen.input_tensor_id = input_id;
+            gen.output_tensor_id = output_id;
+            gen.n = req.n;
+            gen.alpha = req.alpha;
+            gen.beta = req.beta;
+            gen.fusion_mask = fusion_mask;
+            gen.caps_mask = caps_mask;
+            gen.memory_regime = regime_id;
+            if (op_enum == FER_JIT_INTENT_OP_CONV2D_F32) {
+                uint64_t v = 0;
+                if (parse_u64(json, "height", &v)) gen.height = static_cast<uint32_t>(v);
+                if (parse_u64(json, "width", &v)) gen.width = static_cast<uint32_t>(v);
+                if (parse_u64(json, "channels", &v)) gen.channels = static_cast<uint32_t>(v);
+                if (parse_u64(json, "kernel_h", &v)) gen.kernel_h = static_cast<uint32_t>(v);
+                if (parse_u64(json, "kernel_w", &v)) gen.kernel_w = static_cast<uint32_t>(v);
+                if (parse_u64(json, "pad_h", &v)) gen.pad_h = static_cast<uint32_t>(v);
+                if (parse_u64(json, "pad_w", &v)) gen.pad_w = static_cast<uint32_t>(v);
+                if (parse_u64(json, "stride_h", &v)) gen.stride_h = static_cast<uint32_t>(v);
+                if (parse_u64(json, "stride_w", &v)) gen.stride_w = static_cast<uint32_t>(v);
+                if (parse_u64(json, "num_filters", &v)) gen.num_filters = static_cast<uint32_t>(v);
+                uint64_t wid = 0, bid_conv = 0;
+                if (parse_u64(json, "weights", &wid)) gen.weights_tensor_id = wid;
+                if (parse_u64(json, "bias", &bid_conv)) gen.bias_tensor_id = bid_conv;
+            }
+            if (op_enum == FER_JIT_INTENT_OP_SOFTMAX_F32) {
+                uint64_t v = 0;
+                if (parse_u64(json, "height", &v)) gen.height = static_cast<uint32_t>(v);
+            }
+            st = fer_agent_jit_intent_run(adapter, &gen, &job_id);
+        }
+
         if (st.code != FER_STATUS_OK) {
-            policy_end_job(req.session_id);
+            policy_end_job(session_id);
             return write_error(out_json, out_json_len, st);
         }
         char payload[128];
@@ -941,6 +1091,27 @@ extern "C" fer_status_t fer_agent_mcp_dispatch(
                 static_cast<unsigned long long>(policy.max_tensor_bytes),
                 static_cast<unsigned long long>(policy.max_total_session_bytes),
                 static_cast<unsigned long long>(policy.max_jobs_in_flight))) {
+            return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INTERNAL_ERROR, "payload format failed"});
+        }
+        return write_ok(out_json, out_json_len, payload);
+    }
+
+    if (std::strcmp(tool_name, "fer.jit.stats") == 0) {
+        uint64_t session_id = 0;
+        if (!parse_u64(json, "session_id", &session_id)) return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INVALID_ARGUMENT, "missing session_id"});
+        // JIT stats are global (not per-session), but we validate the session exists.
+        fer_agent_runtime_inspect_t info{};
+        fer_status_t st = fer_agent_runtime_inspect(adapter, &info);
+        if (st.code != FER_STATUS_OK) return write_error(out_json, out_json_len, st);
+        // For now, report capabilities. Full per-session JIT stats would need
+        // a C adapter function that calls fer_jit_get_stats on the session.
+        char payload[512];
+        if (!writef(
+                payload, sizeof(payload),
+                "{\"jit_compile_supported\":%s,\"jit_intent_supported\":%s,"
+                "\"disk_cache_enabled\":true,\"disk_cache_max_bytes\":268435456}",
+                info.supports_jit_compile ? "true" : "false",
+                info.supports_jit_intent ? "true" : "false")) {
             return write_error(out_json, out_json_len, fer_status_t{FER_STATUS_INTERNAL_ERROR, "payload format failed"});
         }
         return write_ok(out_json, out_json_len, payload);

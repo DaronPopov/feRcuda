@@ -1,0 +1,56 @@
+[package]
+name = "ptx_os"
+version = "0.1.0"
+edition = "2021"
+authors = ["PTX-OS Team"]
+description = "Rust bindings for PTX-OS - Persistent GPU Operating System"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "ptx_os"
+crate-type = ["lib"]
+
+[[bin]]
+name = "ptx_demo"
+path = "src/bin/demo.rs"
+
+[[bin]]
+name = "ptx_test"
+path = "src/bin/test.rs"
+
+[[bin]]
+name = "ptx_daemon"
+path = "src/bin/ptx_daemon.rs"
+
+[dependencies]
+libc = "0.2"
+thiserror = "2.0"
+parking_lot = "0.12"
+once_cell = "1.19"
+bytemuck = { version = "1.16", features = ["derive"] }
+
+[build-dependencies]
+cc = "1.0"
+
+# Points to the in-tree native core for the C library build
+# The build.rs should find native/core via FERCUDA_NATIVE_ROOT or relative path
+
+[features]
+default = []
+debug = []
+
+[profile.release]
+panic = "abort"
+lto = "thin"
+codegen-units = 1
+
+[profile.regime]
+inherits = "release"
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+debug = 1
+overflow-checks = true
+debug-assertions = false

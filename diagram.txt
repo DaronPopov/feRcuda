@@ -3,9 +3,9 @@ feR-os (feRcuda) - Architecture Overview
 
 User / App Layer
 ----------------
-  Rust apps (fercuda-ffi)   C/C++ apps   Python/FFI
-           |                    |             |
-           +--------------------+-------------+
+  Rust apps (fercuda-ffi, candle-ptx-os)   C/C++ apps   Python/FFI
+           |                                    |             |
+           +------------------------------------+-------------+
                                 |
                          C API: libfercuda_capi.so
                                 |
@@ -16,32 +16,40 @@ Runtime / Control Plane
     |- JobManager
     |- ExecPlanner
     |- RegimeManager
-    +-> Persistent GPU Scheduler (resident CTA)
-          |- ring queue (priority/FIFO)
-          +-> dispatch OpCodes (MATMUL/NORM/ACT/ELEMENTWISE/COPY)
+    +-> ElasticPool (delegates to native TLSF)
+          |- mutable (TLSF via gpu_hot_alloc/free)
+          +-> immutable (append-only weights)
+
+Native PTX-OS Layer (libptx_core.so, libptx_kernels.so)
+-------------------------------------------------------
+  GPUHotRuntime
+    |- TLSF allocator (O(1) alloc/free)
+    |- Stream pool
+    |- Tensor ops (add, mul, matmul, softmax, reduce, ...)
+    +-> JIT (intent lowering, fusion, PTX cache)
 
 Memory Plane
 ------------
-  ElasticPool (slabs)
-    |- mutable slab (activations/scratch)
+  ElasticPool (delegates to native)
+    |- mutable slab (activations/scratch) -> gpu_hot_alloc/free
     |- immutable slab (weights/constants)
     +-> TLSF reclaim path (fast alloc/free reuse)
 
 Compute Plane
 -------------
-  CUDA ops kernels
-    |- elementwise
-    |- matmul
-    |- activation
-    +|- norm
+  CUDA ops (native + bridge)
+    |- elementwise (ptx_tensor_*)
+    |- matmul, layer_norm (ops_bridge)
+    |- activation, reduce, softmax
+    +-> JIT intent execution
 
 Integration / Compatibility
 ---------------------------
-  fercuda_intercept.so (LD_PRELOAD optional)
+  libptx_hook.so (LD_PRELOAD optional)
     |- intercept cudaMalloc/cudaFree (+ async/managed/host/pitch)
-    |- permissive mode: fallback to native CUDA when needed
-    |- strict mode: reject when regime path unavailable
-    +-> telemetry counters for compatibility behavior
+    |- PTX_HOOK_MODE: tlsf | cuda | hybrid
+    |- PTX_HOOK_VERBOSE, PTX_HOOK_DEVICE, PTX_HOOK_DISABLE
+    +-> routes allocations through PTX-OS TLSF
 
 Build + Install + Update
 ------------------------
@@ -54,6 +62,8 @@ Build + Install + Update
 
 Outputs
 -------
-  libfercuda.a
+  libfercuda.a (static)
+  libptx_core.so
+  libptx_kernels.so
+  libptx_hook.so (intercept, LD_PRELOAD)
   libfercuda_capi.so
-  libfercuda_intercept.so

@@ -10,7 +10,15 @@ enum class IROpKind {
     ElementwiseAdd,
     ElementwiseMul,
     ElementwiseRelu,
+    ElementwiseSigmoid,
+    ElementwiseTanh,
+    ElementwiseExp,
+    ReduceSum,
+    ReduceMax,
+    Softmax,
+    Conv2d,
     FusedElementwiseChain,
+    FusedReduceChain,
 };
 
 struct IRValue {
@@ -42,6 +50,7 @@ struct KernelModule {
     KernelIR ir;
     std::vector<std::string> extra_nvrtc_opts;
     std::vector<std::string> notes;
+    std::string fused_kernel_source;
 };
 
 } // namespace fer::jit::lowering

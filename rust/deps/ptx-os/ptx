@@ -1,0 +1,15 @@
+#!/bin/bash
+# PTX-OS Daemon CLI Wrapper
+# Usage: ./ptx <command> [args]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+export LD_LIBRARY_PATH="$ROOT_DIR/build:$LD_LIBRARY_PATH"
+
+# Build if needed
+if [ ! -f "$SCRIPT_DIR/target/release/ptx_daemon" ]; then
+    echo "Building ptx_daemon..."
+    cd "$SCRIPT_DIR" && cargo build --release --bin ptx_daemon 2>/dev/null
+fi
+
+exec "$SCRIPT_DIR/target/release/ptx_daemon" "$@"

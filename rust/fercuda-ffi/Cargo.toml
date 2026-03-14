@@ -18,7 +18,13 @@ candle-core = { version = "0.8.4", optional = true, default-features = false }
 anyhow = { version = "1", optional = true }
 cudarc = { version = "0.13", optional = true, default-features = false, features = ["driver", "cuda-version-from-build-system"] }
 
+# Native PTX-OS inference stack
+ptx_os = { path = "../deps/ptx-os", optional = true }
+candle-ptx-os = { path = "../deps/candle-ptx-os", optional = true }
+cudarc-ptx = { path = "../deps/cudarc-ptx", optional = true, default-features = false, features = ["driver", "cuda-version-from-build-system"] }
+
 [features]
 default = []
 candle = ["dep:candle-core", "dep:anyhow"]
 cudarc = ["dep:cudarc"]
+ptx-os = ["dep:ptx_os", "dep:candle-ptx-os", "dep:cudarc-ptx"]

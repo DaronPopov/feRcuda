@@ -117,6 +117,9 @@ typedef struct fer_jit_stats {
     uint64_t launch_count;
     uint64_t compile_time_us;
     uint64_t launch_time_us;
+    uint64_t disk_cache_entries;
+    uint64_t disk_cache_bytes;
+    uint64_t memory_cache_entries;
 } fer_jit_stats_t;
 
 #ifdef __cplusplus

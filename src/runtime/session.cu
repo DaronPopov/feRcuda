@@ -1,5 +1,7 @@
 #include "fercuda/runtime/session.cuh"
 
+#include "gpu/gpu_hot_runtime.h"
+
 #include <cuda_runtime.h>
 
 namespace fer::runtime {
@@ -65,11 +67,47 @@ RuntimeSession::RuntimeSession(int device, PoolConfig cfg)
       registry_(algorithms::make_default_registry()),
       exec_planner_(&regime_mgr_, &registry_, &ctx_) {
     ctx_.device = DeviceId(device);
-    ctx_.stream = StreamHandle(0);
+
+    // Boot the native GPU OS runtime and attach it as the memory backend.
+    GPUHotConfig os_cfg = gpu_hot_default_config();
+    os_cfg.fixed_pool_size = cfg.mutable_bytes + cfg.immutable_bytes;
+    if (os_cfg.fixed_pool_size < 64ull * 1024ull * 1024ull)
+        os_cfg.fixed_pool_size = 64ull * 1024ull * 1024ull;
+    os_cfg.quiet_init = !cfg.verbose;
+    os_cfg.reserve_vram = cfg.cuda_reserve;
+
+    native_rt_ = gpu_hot_init_with_config(device, "fercuda", &os_cfg);
+    if (native_rt_) {
+        pool_.set_native_runtime(native_rt_);
+        cudaStream_t os_stream = gpu_hot_get_stream(native_rt_, 0);
+        ctx_.stream = StreamHandle(os_stream);
+    } else {
+        ctx_.stream = StreamHandle(0);
+    }
 }
 
 RuntimeSession::~RuntimeSession() {
     job_mgr_.shutdown();
+
+    // Free all outstanding buffers while the native runtime is still alive.
+    for (auto& kv : buffers_) {
+        BufferRecord& rec = kv.second;
+        if (!rec.external && rec.ptr) {
+            regime_mgr_.free_bytes(rec.ptr, rec.regime_id);
+            rec.ptr = nullptr;
+        } else if (rec.external && rec.deleter) {
+            rec.deleter(rec.ptr, rec.deleter_user_ctx);
+            rec.ptr = nullptr;
+        }
+    }
+    buffers_.clear();
+
+    // Detach the native runtime from the pool, then shut it down.
+    pool_.set_native_runtime(nullptr);
+    if (native_rt_) {
+        gpu_hot_shutdown(native_rt_);
+        native_rt_ = nullptr;
+    }
 }
 
 Status RuntimeSession::register_custom_allocator(uint32_t regime_id, const CustomAllocator& allocator) {

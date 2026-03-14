@@ -1,0 +1,41 @@
+[package]
+name = "candle-ptx-os"
+version = "0.1.0"
+edition = "2021"
+authors = ["PTX-OS Team"]
+description = "Candle ML backend using PTX-OS's O(1) TLSF GPU allocator and pre-warmed stream pools"
+license = "MIT"
+
+[lib]
+name = "candle_ptx_os"
+path = "src/lib.rs"
+
+[dependencies]
+candle-core = { path = "../candle-core-ptx", features = ["cuda", "ptx-os"] }
+ptx_os = { path = "../ptx-os" }
+cudarc-ptx = { path = "../cudarc-ptx", features = ["driver", "cublas", "curand", "cuda-version-from-build-system", "ptx-os"] }
+half = { version = "2.4", features = ["num-traits", "bytemuck"] }
+thiserror = "2.0"
+parking_lot = "0.12"
+bytemuck = { version = "1.16", features = ["derive"] }
+num-traits = "0.2"
+rand = "0.8"
+rand_distr = "0.4"
+
+[dev-dependencies]
+criterion = "0.5"
+anyhow = "1"
+
+[[bench]]
+name = "alloc_bench"
+harness = false
+
+[features]
+default = []
+# Enable PTX-OS stream pool integration with cudarc
+ptx-streams = []
+
+[profile.release]
+panic = "abort"
+lto = "thin"
+codegen-units = 1

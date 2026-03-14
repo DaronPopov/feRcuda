@@ -16,6 +16,8 @@
 #include "fercuda/runtime/job_manager.cuh"
 #include "fercuda/runtime/regime_manager.cuh"
 
+struct GPUHotRuntime;
+
 namespace fer::runtime {
 
 using BufferId = uint64_t;
@@ -84,6 +86,7 @@ private:
     static bool same_regime(uint32_t lhs, uint32_t rhs) { return lhs == rhs; }
 
     int device_ = 0;
+    GPUHotRuntime* native_rt_ = nullptr;
     ElasticPool pool_;
     RegimeManager regime_mgr_;
     JobManager job_mgr_;
