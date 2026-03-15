@@ -58,16 +58,20 @@ echo "  Target arch: $TARGET_ARCH (100=B200, 89=Ada, 90=Hopper)"
 echo "  Target CUDA: $TARGET_CUDA -> feature $CUDARC_FEATURE"
 echo ""
 
-# 1. Native layer - build only ptx_core and ptx_kernels (skip bench/tests)
+# 1. Native layer - ptx_core, ptx_kernels, ptx_hook, bench_alloc_vs_cudamalloc
 echo "[1/4] Building native layer..."
 CMAKE_EXTRA=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="$TARGET_ARCH")
 # Force nvcc when targeting B200 so CMake doesn't use cached CUDA 12.6 (lacks compute_100)
 [[ "$TARGET_ARCH" == "100" ]] && CMAKE_EXTRA+=(-DCMAKE_CUDA_COMPILER="$(which nvcc)")
 cmake -S . -B build "${CMAKE_EXTRA[@]}"
-cmake --build build -j"$(nproc 2>/dev/null || echo 8)" --target ptx_core ptx_kernels
+NATIVE_TARGETS="ptx_core ptx_kernels"
+[[ "$(uname)" == "Linux" ]] && NATIVE_TARGETS="$NATIVE_TARGETS ptx_hook bench_alloc_vs_cudamalloc"
+cmake --build build -j"$(nproc 2>/dev/null || echo 8)" --target $NATIVE_TARGETS
 
 cp build/libptx_core.so build/libptx_kernels.so "$PKG_LIBS/"
-echo "  -> $PKG_LIBS/"
+[[ -f build/libptx_hook.so ]] && cp build/libptx_hook.so "$PKG_LIBS/"
+[[ -x build/bench_alloc_vs_cudamalloc ]] && cp build/bench_alloc_vs_cudamalloc "$PKG_BIN/"
+echo "  -> $PKG_LIBS/ $PKG_BIN/"
 
 # 2. Rust benchmarks (aten-ptx needs libtorch from pip)
 echo "[2/4] Building mega_stress_b200 + mega_stress_long + mega_stress_extreme + torch_candle_demo..."

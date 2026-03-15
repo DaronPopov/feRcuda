@@ -13,8 +13,12 @@ WHAT PROBLEM IT SOLVES
 ----------------------
 - Allocator jitter: cudaMalloc/cudaFree on every op causes latency spikes; TLSF pools reduce this by ~100–200x
 - Predictability: long-running GPU services need stable execution paths, not compiler-driven fusion drift
-- Deployment: clusters often have Python but not cmake/nvcc; the wheel lets you build on a dev machine and install anywhere
 - Integration: one runtime usable from CUDA C++, C ABI, Rust, PyTorch, and Candle
+
+DEMO: cudaMalloc vs TLSF
+------------------------
+feRcuda-bench-alloc runs the same alloc/free workload twice (native cudaMalloc, then TLSF via LD_PRELOAD)
+and prints ns/op and speedup. Typical result: TLSF ~100–200x faster.
 
 ONE LINER
 ---------
