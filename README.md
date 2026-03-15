@@ -157,6 +157,7 @@ bash scripts/trim_cache.sh --global-cargo --feros-state
 
 - `rust/fercuda-ffi` — C API bridge
 - `rust/deps/fercuda-llm-lite` — extracted portable LLM Rust utilities from `ferrite-llm` (tokenizer, sampling, generation, model registry)
+- `rust/apps/fercuda-llm-app` — application-layer LLM tooling using `ptx_os` plus `fercuda-llm-lite`
 - `rust/deps/ptx-os` — PTX-OS FFI (TLSF, streams, runtime)
 - `rust/deps/cudarc-ptx` — CUDA driver wrapper with PTX-OS integration
 - `rust/deps/candle-ptx-os` — Candle ML backend on PTX-OS
