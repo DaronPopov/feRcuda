@@ -8,8 +8,8 @@
 #include <thread>
 #include <vector>
 
-static constexpr int kNumThreads = 4;
-static constexpr int kOpsPerThread = 64;
+static constexpr int kNumThreads = 16;
+static constexpr int kOpsPerThread = 1000;
 static constexpr size_t kMinAlloc = 256;
 static constexpr size_t kMaxAlloc = 1 << 16;  // 64 KiB
 

@@ -401,6 +401,14 @@ impl RegimeRuntimeCore {
         }
     }
 
+    /// Get raw CUDA stream pointer for the given stream ID (for PyTorch/tch-rs adapter).
+    ///
+    /// # Safety
+    /// The returned pointer is only valid while this runtime exists.
+    pub unsafe fn get_raw_stream(&self, stream_id: i32) -> *mut std::ffi::c_void {
+        ffi::gpu_hot_get_stream(self.as_ptr(), stream_id)
+    }
+
     /// Send keepalive signal to GPU.
     pub fn keepalive(&self) {
         let guard = self.inner.lock();

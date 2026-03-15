@@ -108,6 +108,21 @@ curl -fsSL https://raw.githubusercontent.com/DaronPopov/feRcuda/main/scripts/ins
 
 Clones feRcuda, builds for arch 100, runs `mega_stress_b200`. Requires CUDA 13.1, cmake, rustc, and `pip install torch`.
 
+**Python wheel (for clusters with only Python):** Build on a machine with `module load cmake cuda gcc`, then install the wheel on the cluster:
+
+```bash
+# Build (machine with cmake, nvcc, rust)
+module load cmake cuda gcc
+./scripts/build_wheel.sh
+# -> python/dist/feRcuda_mega_test-0.1.0-*.whl
+
+# Install on cluster (only Python needed)
+pip install feRcuda_mega_test-*.whl
+pip install torch
+feRcuda-mega-test
+```
+
+
 **Note:** PyTorch (ferrite-torch) requires libtorch built for CUDA 13.1. If pip `torch` doesn't yet support 13.1, set `LIBTORCH` to a compatible libtorch build.
 
 If needed at runtime:

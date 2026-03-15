@@ -319,7 +319,7 @@ pub fn get_pool_stats() -> Option<PoolStats> {
 /// Set PyTorch's current CUDA stream to a PTX-OS stream (thread-local)
 pub fn set_torch_stream(stream_id: usize) {
     let rt = GLOBAL_RUNTIME.get().expect("TLSF not initialized");
-    let raw_stream = rt.get_raw_stream(stream_id as i32);
+    let raw_stream = unsafe { rt.get_raw_stream(stream_id as i32) };
     adapter::set_torch_stream(raw_stream, 0);
 }
 

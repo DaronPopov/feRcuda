@@ -50,3 +50,6 @@ name = "candle_torch_cohab"
 
 [[example]]
 name = "mega_stress_b200"
+
+[[example]]
+name = "mega_stress_long"
