@@ -15,6 +15,10 @@ Cargo.lock
 # python
 __pycache__/
 *.pyc
+python/build/
+python/dist/
+python/*.egg-info/
+python/feRcuda_mega_test/bin/
 
 # editor/system
 .vscode/

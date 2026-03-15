@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feRcuda-mega-test"
+version = "0.1.0"
+description = "feRcuda B200 mega stress test (pre-built wheel)"
+readme = "README.md"
+license = {text = "MIT OR Apache-2.0"}
+requires-python = ">=3.8"
+dependencies = ["torch>=2.0"]
+
+[project.scripts]
+feRcuda-mega-test = "feRcuda_mega_test.__main__:main"
+feRcuda-mega-test-long = "feRcuda_mega_test.__main__:main_long"
+feRcuda-mega-test-extreme = "feRcuda_mega_test.__main__:main_extreme"
+feRcuda-demo = "feRcuda_mega_test.__main__:main_demo"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["feRcuda_mega_test*"]
+
+[tool.setuptools.package-data]
+feRcuda_mega_test = ["libs/*.so", "bin/*"]

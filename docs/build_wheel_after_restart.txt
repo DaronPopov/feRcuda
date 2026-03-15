@@ -1,0 +1,21 @@
+# Commands to create feRcuda mega test wheel (after CUDA 13.1 install + restart)
+
+# 1. Go to feRcuda repo
+cd ~/feRcuda
+
+# 2. Activate venv (has torch)
+source .venv/bin/activate
+
+# 3. Build wheel (targets B200 arch 100 with CUDA 13.1)
+./scripts/build_wheel.sh
+
+# 4. Wheel output
+# python/dist/feRcuda_mega_test-0.1.0-*.whl
+
+# 5. Install on cluster (copy wheel, then):
+# pip install feRcuda_mega_test-0.1.0-*.whl
+# pip install torch
+# feRcuda-mega-test          # standard (~10k cycles)
+# feRcuda-mega-test-long     # extended with numeric results (~50k cycles)
+# feRcuda-mega-test-extreme  # compute + allocation stress
+# feRcuda-demo               # Torch+Candle demo with printed tensor values
