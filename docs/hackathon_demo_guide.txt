@@ -1,0 +1,292 @@
+============================================================
+feR-OS / feRcuda Hackathon Demo Guide
+Clean Command Reference
+============================================================
+
+-----------------------------------
+1. WHAT EACH DEMO DOES
+-----------------------------------
+
+feRcuda-mega-test
+  Standard stress test (~10k cycles). Quick smoke test that TLSF + PyTorch
+  work. Mixed Candle/PyTorch matmuls, alloc/free churn. Good first run.
+
+feRcuda-mega-test-long
+  Extended stress (~50k cycles) with numeric results. Phases: large matmul
+  churn, dynamic NAS, large-tensor burst, streaming alloc-compute-free,
+  giant tensor burst. Reports GFLOPS, TFLOPS, GiB/sec. Takes a few minutes.
+
+feRcuda-mega-test-extreme
+  Compute-heavy + allocation-heavy. Deep GEMM pipeline, fragmentation churn,
+  attention-style stream. Shows TLSF under heavy mixed workload. Longer run.
+
+feRcuda-demo
+  Torch + Candle demo with printed tensor values. 256×256 matmuls, prints
+  8×8 corners and stats. Proves both frameworks share one TLSF pool.
+
+feRcuda-bench-alloc
+  cudaMalloc vs TLSF alloc/free benchmark. Runs same workload twice (native
+  cudaMalloc, then TLSF via LD_PRELOAD). Prints ns/op and speedup. Typical:
+  TLSF ~100–200x faster than cudaMalloc.
+
+feRcuda-transformer
+  Transformer inference demo. Multi-head attention + FFN on TLSF. Variable
+  sequence lengths (16–512), 300 requests. Prints latency percentiles
+  (avg, p50, p90, p99) and fragmentation. Shows real inference on TLSF.
+
+-----------------------------------
+2. CONNECT TO THE CLUSTER
+-----------------------------------
+
+From your local machine:
+
+ssh -i ~/.ssh/daronslurm user06@35.84.33.219
+
+-----------------------------------
+3. BUILD FERCUDA WHEEL (LOCAL)
+-----------------------------------
+
+cd /home/daron/feRcuda
+./scripts/build_wheel.sh
+
+Output file:
+
+python/dist/fercuda_mega_test-0.1.0-py3-none-any.whl
+
+-----------------------------------
+4. UPLOAD WHEEL TO CLUSTER
+-----------------------------------
+
+scp /home/daron/feRcuda/python/dist/fercuda_mega_test-0.1.0-py3-none-any.whl user06@35.84.33.219:~/
+
+-----------------------------------
+5. LOGIN TO CLUSTER
+-----------------------------------
+
+ssh user06@35.84.33.219
+
+-----------------------------------
+6. INSTALL PYTHON ENVIRONMENT
+-----------------------------------
+
+If pip is missing:
+
+python3 -c "import urllib.request; urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py','get-pip.py')" && python3 get-pip.py --user
+
+Install the wheel:
+
+python3 -m pip install --user --force-reinstall ~/fercuda_mega_test-0.1.0-py3-none-any.whl
+
+Verify install:
+
+python3 -c "import fercuda_mega_test; print(fercuda_mega_test)"
+
+-----------------------------------
+7. ALLOCATE GPU (SLURM)
+-----------------------------------
+
+Interactive GPU shell:
+
+srun --gpus=1 --pty bash
+
+Larger allocation:
+
+srun --gpus=1 --cpus-per-gpu=8 --mem=32G --time=01:00:00 --pty bash
+
+-----------------------------------
+8. RUNTIME EXECUTION
+-----------------------------------
+
+Standard test:
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-mega-test
+
+Long stress test:
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-mega-test-long
+
+Python module version:
+
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+python3 -m feRcuda_mega_test long
+
+-----------------------------------
+9. EXTREME TEST
+-----------------------------------
+
+srun --gres=gpu:1 --pty bash
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-mega-test-extreme
+
+-----------------------------------
+10. TORCH + CANDLE DEMO
+-----------------------------------
+
+srun --gres=gpu:1 --pty bash
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-demo
+
+-----------------------------------
+11. TRANSFORMER DEMO
+-----------------------------------
+
+srun --gres=gpu:1 --pty bash
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-transformer
+
+-----------------------------------
+12. SLURM BATCH DEMO (RUN WITHOUT LAPTOP)
+-----------------------------------
+
+Create script:
+
+cat > run_demo.sh << 'EOF'
+#!/bin/bash
+#SBATCH --gres=gpu:1
+#SBATCH --mem=160gb
+#SBATCH -J fercuda-demo
+#SBATCH --output=fercuda-demo-%j.out
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-demo
+EOF
+
+Submit job:
+
+sbatch run_demo.sh
+
+Transformer batch:
+
+cat > ~/run_transformer.sh << 'EOF'
+#!/bin/bash
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH -J fercuda-transformer
+#SBATCH --output=fercuda-transformer-%j.out
+
+export HOME="${HOME:-/mnt/sharefs/user06}"
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+/mnt/sharefs/user06/.local/bin/feRcuda-transformer
+EOF
+chmod +x ~/run_transformer.sh
+sbatch ~/run_transformer.sh
+
+-----------------------------------
+13. ALLOCATION VS CUDA MALLOC TEST
+-----------------------------------
+
+cat > ~/run_bench_alloc.sh << 'EOF'
+#!/bin/bash
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH -J fercuda-bench-alloc
+#SBATCH --output=fercuda-bench-alloc-%j.out
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-bench-alloc
+EOF
+chmod +x ~/run_bench_alloc.sh
+sbatch ~/run_bench_alloc.sh
+
+-----------------------------------
+14. JOB MONITORING
+-----------------------------------
+
+See jobs:
+
+squeue -u user06
+
+Example output (487=RUNNING, 490=PENDING waiting for GPU):
+             JOBID PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)
+               490  priority fercuda-   user06 PD       0:00      1 (QOSMaxGRESPerUser)
+               487  priority     bash   user06  R      16:41      1 us-west-a2-gpu-011
+
+Job details (use your job number):
+
+scontrol show job 487
+scontrol show job 490
+
+List output files:
+
+ls -lt fercuda-*.out | head -5
+
+Example output:
+-rw-rw-r-- 1 user06 user06    0 Mar 15 12:06 fercuda-transformer-485.out
+-rw-rw-r-- 1 user06 user06 1410 Mar 15 11:57 fercuda-bench-alloc-483.out
+-rw-rw-r-- 1 user06 user06 7166 Mar 15 11:47 fercuda-demo-481.out
+-rw-rw-r-- 1 user06 user06 7167 Mar 15 11:45 fercuda-demo-480.out
+-rw-rw-r-- 1 user06 user06 7167 Mar 15 11:41 fercuda-demo-478.out
+
+Then cat the exact filename (use "cat" - it's a file, not a command):
+cat fercuda-transformer-485.out
+cat fercuda-bench-alloc-483.out
+cat fercuda-demo-481.out
+cat fercuda-demo-480.out
+cat fercuda-demo-478.out
+
+-----------------------------------
+15. DIAGNOSTICS
+-----------------------------------
+
+If "feRcuda-transformer: command not found" in job err log:
+  - Rebuild wheel locally, copy, reinstall (transformer was added recently)
+  - Or use full path: $HOME/.local/bin/feRcuda-transformer in batch script
+
+Install numpy if missing:
+
+python3 -m pip install --user numpy
+
+Check CUDA runtime:
+
+find /usr /usr/local -name 'libcudart.so*' 2>/dev/null
+
+Check GPU:
+
+nvidia-smi
+
+Check queue:
+
+squeue
+
+Cancel job (use your job number, e.g. cancel 487 to free GPU for 490):
+
+scancel 487
+scancel 490
+
+-----------------------------------
+16. JOB STATUS QUICK REFERENCE
+-----------------------------------
+
+# See your jobs
+squeue -u user06
+
+# See details for a specific job (use your job number)
+scontrol show job 487
+scontrol show job 490
+
+# List output files
+ls -lt fercuda-*.out | head -5
+
+# Cat the exact filename from the list
+cat fercuda-transformer-485.out
+cat fercuda-bench-alloc-483.out
+cat fercuda-demo-481.out
+cat fercuda-demo-480.out
+cat fercuda-demo-478.out
+
+============================================================
+END OF DEMO GUIDE
+============================================================
