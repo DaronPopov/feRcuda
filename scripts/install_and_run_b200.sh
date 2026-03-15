@@ -40,6 +40,21 @@ fi
 ROOT="$SOURCE_DIR"
 cd "$ROOT"
 
+
+# -----------------------------------------------------------------------------
+# Ensure cmake available (bootstrap via pip if missing, e.g. on Slurm clusters)
+# -----------------------------------------------------------------------------
+ensure_cmake() {
+  if command -v cmake &>/dev/null; then return 0; fi
+  if command -v module &>/dev/null; then
+    module load cmake 2>/dev/null && command -v cmake &>/dev/null && return 0
+  fi
+  echo "cmake not found, installing via pip..."
+  pip install --user cmake 2>/dev/null || pip3 install --user cmake 2>/dev/null || true
+  export PATH="${HOME}/.local/bin:${PATH}"
+  command -v cmake &>/dev/null
+}
+ensure_cmake || { echo "ERROR: cmake required. Install: pip install cmake  OR  module load cmake"; exit 1; }
 # -----------------------------------------------------------------------------
 # 2. Build native layer (B200 arch 100)
 # -----------------------------------------------------------------------------
