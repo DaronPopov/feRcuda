@@ -19,3 +19,19 @@ source .venv/bin/activate
 # feRcuda-mega-test-long     # extended with numeric results (~50k cycles)
 # feRcuda-mega-test-extreme  # compute + allocation stress
 # feRcuda-demo               # Torch+Candle demo with printed tensor values
+
+# 6. Run on GPU node (login nodes have no GPU - use sbatch, not srun --pty)
+# Create run_extreme.sh (avoids 2TB default mem that can cause job failure):
+#
+#   #!/bin/bash
+#   #SBATCH --gres=gpu:1
+#   #SBATCH --mem=32G
+#   #SBATCH -J fercuda-extreme
+#   #SBATCH --output=fercuda-%j.out
+#
+#   export PATH="$HOME/.local/bin:$PATH"
+#   export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+#   feRcuda-mega-test-extreme
+#
+# Then: sbatch run_extreme.sh
+# (Same for feRcuda-demo - change -J and the command)
