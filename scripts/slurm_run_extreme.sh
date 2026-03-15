@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --gres=gpu:1
-#SBATCH --mem=32G
+#SBATCH --mem=64G
+# B200/GB200 = 192GB VRAM; request less than that for system RAM
 #SBATCH -J fercuda-extreme
 #SBATCH --output=fercuda-extreme-%j.out
 

@@ -30,7 +30,7 @@ source .venv/bin/activate
 #
 #   #!/bin/bash
 #   #SBATCH --gres=gpu:1
-#   #SBATCH --mem=32G
+#   #SBATCH --mem=64G
 #   #SBATCH -J fercuda-extreme
 #   #SBATCH --output=fercuda-%j.out
 #
