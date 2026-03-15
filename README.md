@@ -88,6 +88,28 @@ bash scripts/install.sh --no-ferrite-mcp
 
 Default CUDA architectures are set in `CMakeLists.txt` and can be overridden with `--arch-list`.
 
+### NVIDIA B200 + CUDA 13.1 (Driver 590)
+
+```bash
+# On B200 machine (auto-detects arch 100, CUDA 13.1 from nvcc)
+./scripts/build_b200.sh
+
+# Cross-compile from another machine
+CUDARC_CUDA_VERSION=13010 ./scripts/build_b200.sh --cross
+```
+
+Or with install script: `bash scripts/install.sh --arch-list 100`
+
+**One-line install + run mega test on B200:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DaronPopov/feRcuda/main/scripts/install_and_run_b200.sh | bash
+```
+
+Clones feRcuda, builds for arch 100, runs `mega_stress_b200`. Requires CUDA 13.1, cmake, rustc, and `pip install torch`.
+
+**Note:** PyTorch (ferrite-torch) requires libtorch built for CUDA 13.1. If pip `torch` doesn't yet support 13.1, set `LIBTORCH` to a compatible libtorch build.
+
 If needed at runtime:
 
 ```bash
@@ -122,7 +144,27 @@ bash scripts/trim_cache.sh --global-cargo --feros-state
 - `rust/deps/ptx-os` — PTX-OS FFI (TLSF, streams, runtime)
 - `rust/deps/cudarc-ptx` — CUDA driver wrapper with PTX-OS integration
 - `rust/deps/candle-ptx-os` — Candle ML backend on PTX-OS
+- `rust/deps/aten-ptx` — PyTorch/ATen TLSF allocator (patches libtorch CUDACachingAllocator)
+- `rust/deps/ferrite-torch` — PyTorch (tch-rs) + TLSF examples
 - `rust/deps/fercuda-ml-lite`, `fercuda-math`, `fercuda-vision-lite`
+
+### PyTorch + TLSF (aten-ptx / ferrite-torch)
+
+aten-ptx replaces PyTorch's CUDA allocator with PTX-OS TLSF. Auto-detects pip-installed torch and fixes CUDA version mismatch (preloads nvidia/nvjitlink before libtorch).
+
+```bash
+# Build native layer first
+cmake -S . -B build && cmake --build build -j$(nproc)
+
+# Run (auto-detects torch from pip, sets LD_LIBRARY_PATH)
+./rust/deps/ferrite-torch/run_torch_example.sh torch_basic
+./rust/deps/ferrite-torch/run_torch_example.sh torch_training
+./rust/deps/ferrite-torch/run_torch_example.sh candle_torch_cohab   # Candle + PyTorch in one process
+```
+
+Or manually: `LIBTORCH=$(python -c "import torch; print(torch.__path__[0])") LD_LIBRARY_PATH=build:$LIBTORCH/lib cargo run -p ferrite-torch --example torch_basic --release`
+
+Enable in fercuda-ffi: `cargo build -F torch`
 
 ## Compatibility Test Harness
 
@@ -134,25 +176,31 @@ cmake --build build -j"$(nproc)" --target test_intercept_compat
 ctest --test-dir build --output-on-failure -R test_intercept_compat
 ```
 
-Native layer tests (TLSF, tensor ops, production stress):
+Native layer tests (TLSF, tensor ops, production stress, fragmentation, concurrent):
 
 ```bash
 ctest --test-dir build --output-on-failure -R "test_ptx_|test_intercept"
 ```
 
-## External Runtime Benchmark
+- **test_ptx_fragmentation**: alternating-free pattern, ratio bounds, O(1) alloc under fragmentation
+- **test_ptx_concurrent_stress**: 24 threads × 5k ops, alloc+compute, burst contention — OS-level stability
 
-To compare CUDA alloc/free in native vs TLSF intercept mode:
+## TLSF vs cudaMalloc Benchmark
+
+Compare alloc/free latency: TLSF (libptx_hook) vs native cudaMalloc:
 
 ```bash
-# Build
-cmake -S . -B build && cmake --build build -j"$(nproc)"
-
-# Run with TLSF intercept
-LD_PRELOAD=./build/libptx_hook.so your_cuda_app
+cmake -S . -B build && cmake --build build -j"$(nproc)" --target bench_alloc_vs_cudamalloc
+bash scripts/bench_alloc_vs_cudamalloc.sh
 ```
 
-The intercept library `libptx_hook.so` redirects `cudaMalloc`/`cudaFree` through the PTX-OS TLSF allocator. See `native/core/hooks/cuda_intercept.c` for implementation.
+Runs the same workload twice (native, then `LD_PRELOAD=libptx_hook.so`) and reports ns/op and speedup. Typical result: TLSF ~100–200x faster than cudaMalloc for alloc+free.
+
+Manual run:
+```bash
+./build/bench_alloc_vs_cudamalloc                    # native
+LD_PRELOAD=./build/libptx_hook.so ./build/bench_alloc_vs_cudamalloc  # TLSF
+```
 
 ## Repository Layout
 

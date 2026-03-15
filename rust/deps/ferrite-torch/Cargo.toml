@@ -1,0 +1,52 @@
+[package]
+name = "ferrite-torch"
+version = "0.1.0"
+edition = "2021"
+authors = ["Daron Popov"]
+description = "PyTorch (tch-rs) integration with PTX-OS TLSF allocator"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# PyTorch Rust bindings
+tch = "0.22"  # Matches LibTorch 2.9
+
+# PTX-OS / feRcuda stack
+aten-ptx = { path = "../aten-ptx" }
+cudarc-ptx = { path = "../cudarc-ptx", default-features = false, features = ["driver", "ptx-os", "fallback-dynamic-loading", "cuda-version-from-build-system"] }
+
+# Candle (shares TLSF pool with PyTorch when aten-ptx init first)
+candle-core = { path = "../candle-core-ptx", optional = true, features = ["cuda", "ptx-os"] }
+
+# Utilities
+anyhow = "1.0"
+
+[features]
+default = ["cuda-12080", "candle-cohab"]
+candle-cohab = ["dep:candle-core"]
+cuda-11080 = ["cudarc-ptx/cuda-11080"]
+cuda-12000 = ["cudarc-ptx/cuda-12000"]
+cuda-12010 = ["cudarc-ptx/cuda-12010"]
+cuda-12020 = ["cudarc-ptx/cuda-12020"]
+cuda-12030 = ["cudarc-ptx/cuda-12030"]
+cuda-12040 = ["cudarc-ptx/cuda-12040"]
+cuda-12050 = ["cudarc-ptx/cuda-12050"]
+cuda-12060 = ["cudarc-ptx/cuda-12060"]
+cuda-12080 = ["cudarc-ptx/cuda-12080"]
+cuda-12090 = ["cudarc-ptx/cuda-12090"]
+cuda-13000 = ["cudarc-ptx/cuda-13000"]
+cuda-13010 = ["cudarc-ptx/cuda-13010"]
+
+[[example]]
+name = "torch_basic"
+
+[[example]]
+name = "torch_training"
+
+[[example]]
+name = "torch_dynamic_model"
+
+[[example]]
+name = "candle_torch_cohab"
+
+[[example]]
+name = "mega_stress_b200"

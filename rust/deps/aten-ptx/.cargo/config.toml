@@ -1,0 +1,5 @@
+# Point torch-sys (tch crate's build script) at the local libtorch install.
+# aten-ptx's own build.rs already discovers this path, but torch-sys does
+# its own independent discovery via the LIBTORCH env var.
+[env]
+LIBTORCH = { value = "../libtorch", relative = true }

@@ -1,0 +1,45 @@
+[package]
+name = "aten-ptx"
+version = "0.1.0"
+edition = "2021"
+authors = ["Daron Popov"]
+description = "PyTorch/ATen with PTX-OS TLSF allocator - cudarc-ptx but for PyTorch!"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# PTX-OS Runtime (feRcuda)
+ptx_os = { path = "../ptx-os" }
+
+# PyTorch
+tch = "0.22"
+
+# CUDA allocator warmup (uses hooked cudaMalloc via ptx_hook)
+cudarc-ptx = { path = "../cudarc-ptx", default-features = false, features = ["driver", "ptx-os", "fallback-dynamic-loading", "cuda-version-from-build-system"] }
+
+# Utilities
+anyhow = "1.0"
+libc = "0.2"
+
+[build-dependencies]
+cc = "1.0"
+
+[[example]]
+name = "pytorch_tlsf_test"
+
+[[example]]
+name = "impossible_with_pytorch"
+
+[[example]]
+name = "transformer_attention"
+
+[[example]]
+name = "conv_pipeline"
+
+[[example]]
+name = "multi_model_serving"
+
+[[example]]
+name = "multistream_barrage"
