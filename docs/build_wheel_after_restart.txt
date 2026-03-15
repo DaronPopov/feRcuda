@@ -1,6 +1,8 @@
 # Commands to create feRcuda mega test wheel (after CUDA 13.1 install + restart)
+#
+# Cluster does not allow compilation — build locally, copy wheel, install on cluster.
 
-# 1. Go to feRcuda repo
+# 1. Go to feRcuda repo (on local machine with B200/CUDA 13.1)
 cd ~/feRcuda
 
 # 2. Activate venv (has torch)
@@ -12,9 +14,12 @@ source .venv/bin/activate
 # 4. Wheel output
 # python/dist/feRcuda_mega_test-0.1.0-*.whl
 
-# 5. Install on cluster (copy wheel, then):
-# pip install feRcuda_mega_test-0.1.0-*.whl
-# pip install torch
+# 5. Copy wheel to cluster, then install (on cluster):
+#   scp python/dist/fercuda_mega_test-0.1.0-py3-none-any.whl user06@cluster:~
+#   ssh user06@cluster
+#   pip install --user ~/fercuda_mega_test-0.1.0-py3-none-any.whl
+#   pip install torch
+#
 # feRcuda-mega-test          # standard (~10k cycles)
 # feRcuda-mega-test-long     # extended with numeric results (~50k cycles)
 # feRcuda-mega-test-extreme  # compute + allocation stress
