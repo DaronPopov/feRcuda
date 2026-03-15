@@ -143,6 +143,85 @@ feRcuda-mega-test
 
 **Note:** PyTorch (ferrite-torch) requires libtorch built for CUDA 13.1. If pip `torch` doesn't yet support 13.1, set `LIBTORCH` to a compatible libtorch build.
 
+## Cluster Usage (SLURM)
+
+Login nodes are for editing code and submitting jobs — **do not run GPU workloads directly on login nodes.** feRcuda binaries need `libcuda.so.1`; that is only available on GPU compute nodes.
+
+### Quick checks
+
+```bash
+# Am I on a login node?
+[ -n "$SLURM_JOB_ID" ] && echo "On compute node" || echo "On login node"
+
+# View job output by ID
+cat *-<JOBID>.out
+```
+
+### Interactive session (quick testing)
+
+Grab a single GPU interactively:
+
+```bash
+srun --gpus=1 --pty bash
+# Now run: feRcuda-transformer
+```
+
+Request specific resources:
+
+```bash
+srun --gpus=4 --cpus-per-gpu=16 --mem=128G --time=01:00:00 --pty bash
+```
+
+### Interactive allocation (multi-step work)
+
+```bash
+salloc --gpus=2 --time=02:00:00
+# You now have an allocation — run commands against it:
+srun feRcuda-transformer
+# When done:
+exit
+```
+
+### Batch job (long-running / unattended)
+
+Create a job script, e.g. `~/run_transformer.sh`:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=fercuda-transformer
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --time=01:00:00
+#SBATCH --output=fercuda-transformer-%j.out
+#SBATCH --error=fercuda-transformer-%j.err
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-transformer
+```
+
+Submit it:
+
+```bash
+chmod +x ~/run_transformer.sh
+sbatch ~/run_transformer.sh
+```
+
+### Etiquette & fair usage
+
+- **Be mindful of others.** Shared clusters mean shared resources. Don't hog GPUs you aren't actively using.
+- **Set `--time` limits** on all jobs. If your job finishes early, resources free up for others.
+- **Cancel idle allocations.** If you `salloc` a node and walk away, `scancel` it.
+- **Use `--output` and `--error` flags** for batch jobs so you can debug without re-running.
+
+### Shared storage
+
+On clusters with shared Lustre (e.g. `/mnt/sharefs`):
+
+- Files you create on any login node are immediately visible on every compute node (and vice versa).
+- No need to copy data between nodes — just reference paths normally.
+- Be considerate with storage — clean up large intermediate files when you're done.
+
 If needed at runtime:
 
 ```bash
