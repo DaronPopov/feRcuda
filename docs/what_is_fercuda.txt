@@ -1,0 +1,21 @@
+feRcuda — What It Is and What Problem It Solves
+===============================================
+
+WHAT IT IS
+----------
+feRcuda is a deterministic CUDA runtime substrate. It provides:
+- O(1) TLSF pool allocation (native PTX layer) instead of per-op cudaMalloc/cudaFree
+- Deterministic numeric behavior (no implicit fast-math/fusion drift)
+- PyTorch and Candle integration via Rust adapters
+- Pip-installable wheel for HPC clusters (build once, deploy where only Python exists)
+
+WHAT PROBLEM IT SOLVES
+----------------------
+- Allocator jitter: cudaMalloc/cudaFree on every op causes latency spikes; TLSF pools reduce this by ~100–200x
+- Predictability: long-running GPU services need stable execution paths, not compiler-driven fusion drift
+- Deployment: clusters often have Python but not cmake/nvcc; the wheel lets you build on a dev machine and install anywhere
+- Integration: one runtime usable from CUDA C++, C ABI, Rust, PyTorch, and Candle
+
+ONE LINER
+---------
+feRcuda: Rust-native GPU runtime with O(1) TLSF allocation and PyTorch interop, deployable as a pip wheel on B200 HPC clusters.
