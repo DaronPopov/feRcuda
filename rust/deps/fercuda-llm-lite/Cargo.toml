@@ -1,0 +1,20 @@
+[package]
+name = "fercuda-llm-lite"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Portable LLM utility layer extracted from ferrite-llm for feRcuda"
+
+[lib]
+name = "fercuda_llm_lite"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+candle-core = { version = "0.8.4", default-features = false }
+candle-nn = { version = "0.8.4", default-features = false }
+hf-hub = "0.4"
+llm-tokenizer = "1.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

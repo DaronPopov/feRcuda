@@ -30,9 +30,22 @@ feRcuda-bench-alloc
   TLSF ~100–200x faster than cudaMalloc.
 
 feRcuda-transformer
-  Transformer inference demo. Multi-head attention + FFN on TLSF. Variable
-  sequence lengths (16–512), 300 requests. Prints latency percentiles
-  (avg, p50, p90, p99) and fragmentation. Shows real inference on TLSF.
+  Transformer inference demo. Multi-head attention + FFN on TLSF. Long
+  sequence lengths (512–8192), numeric output stats (mean, std, min, max),
+  latency percentiles, tokens/sec. Shows real inference on TLSF.
+
+-----------------------------------
+1b. QUEUE EACH DEMO (sbatch)
+-----------------------------------
+
+After creating scripts (see sections 12–13), submit with:
+
+  sbatch ~/run_mega_test.sh         → feRcuda-mega-test
+  sbatch ~/run_mega_test_long.sh    → feRcuda-mega-test-long
+  sbatch ~/run_extreme.sh           → feRcuda-mega-test-extreme
+  sbatch ~/run_demo.sh              → feRcuda-demo
+  sbatch ~/run_bench_alloc.sh       → feRcuda-bench-alloc
+  sbatch ~/run_transformer.sh       → feRcuda-transformer
 
 -----------------------------------
 2. CONNECT TO THE CLUSTER
@@ -148,7 +161,55 @@ feRcuda-transformer
 12. SLURM BATCH DEMO (RUN WITHOUT LAPTOP)
 -----------------------------------
 
-Create script:
+Mega-test (standard):
+
+cat > ~/run_mega_test.sh << 'EOF'
+#!/bin/bash
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH -J fercuda-mega-test
+#SBATCH --output=fercuda-mega-test-%j.out
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-mega-test
+EOF
+chmod +x ~/run_mega_test.sh
+sbatch ~/run_mega_test.sh
+
+Mega-test-long:
+
+cat > ~/run_mega_test_long.sh << 'EOF'
+#!/bin/bash
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH -J fercuda-mega-test-long
+#SBATCH --output=fercuda-mega-test-long-%j.out
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-mega-test-long
+EOF
+chmod +x ~/run_mega_test_long.sh
+sbatch ~/run_mega_test_long.sh
+
+Extreme batch:
+
+cat > ~/run_extreme.sh << 'EOF'
+#!/bin/bash
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH -J fercuda-extreme
+#SBATCH --output=fercuda-extreme-%j.out
+
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+feRcuda-mega-test-extreme
+EOF
+chmod +x ~/run_extreme.sh
+sbatch ~/run_extreme.sh
+
+Demo batch:
 
 cat > run_demo.sh << 'EOF'
 #!/bin/bash
@@ -209,29 +270,21 @@ See jobs:
 
 squeue -u user06
 
-Example output (487=RUNNING, 490=PENDING waiting for GPU):
-             JOBID PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)
-               490  priority fercuda-   user06 PD       0:00      1 (QOSMaxGRESPerUser)
-               487  priority     bash   user06  R      16:41      1 us-west-a2-gpu-011
+## show a job STATUS
+scontrol show job 512
 
-Job details (use your job number):
-
-scontrol show job 487
-scontrol show job 490
 
 List output files:
 
 ls -lt fercuda-*.out | head -5
 
-Example output:
--rw-rw-r-- 1 user06 user06    0 Mar 15 12:06 fercuda-transformer-485.out
--rw-rw-r-- 1 user06 user06 1410 Mar 15 11:57 fercuda-bench-alloc-483.out
--rw-rw-r-- 1 user06 user06 7166 Mar 15 11:47 fercuda-demo-481.out
--rw-rw-r-- 1 user06 user06 7167 Mar 15 11:45 fercuda-demo-480.out
--rw-rw-r-- 1 user06 user06 7167 Mar 15 11:41 fercuda-demo-478.out
+
 
 Then cat the exact filename (use "cat" - it's a file, not a command):
-cat fercuda-transformer-485.out
+cat fercuda-mega-test-JOBID.out
+cat fercuda-mega-test-long-JOBID.out
+cat fercuda-extreme-JOBID.out
+cat fercuda-transformer-512.out
 cat fercuda-bench-alloc-483.out
 cat fercuda-demo-481.out
 cat fercuda-demo-480.out
@@ -278,9 +331,13 @@ scontrol show job 487
 scontrol show job 490
 
 # List output files
-ls -lt fercuda-*.out | head -5
+ls -lt fercuda-*.out | head -10
 
 # Cat the exact filename from the list
+
+cat *-485.out
+
+
 cat fercuda-transformer-485.out
 cat fercuda-bench-alloc-483.out
 cat fercuda-demo-481.out

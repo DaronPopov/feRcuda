@@ -1,0 +1,23 @@
+[package]
+name = "fercuda-llm-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Application-layer LLM tooling on top of feRcuda PTX-OS runtime"
+
+[[bin]]
+name = "fercuda-llm-app"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+candle-core = { version = "0.8.4", default-features = false, features = ["cuda", "ptx-os"] }
+candle-transformers = "0.8.4"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+fercuda-llm-lite = { path = "../../deps/fercuda-llm-lite" }
+ptx_os = { path = "../../deps/ptx-os" }
+
+[patch.crates-io]
+candle-core = { path = "../../deps/candle-core-ptx" }
+ug-cuda = { path = "../../deps/ug-cuda-shim" }

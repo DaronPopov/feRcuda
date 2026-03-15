@@ -1,0 +1,14 @@
+[package]
+name = "ug-cuda"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Local minimal ug-cuda shim for Candle/PTX integration"
+
+[lib]
+name = "ug_cuda"
+path = "src/lib.rs"
+
+[dependencies]
+half = "2"
+ug = "0.1.0"

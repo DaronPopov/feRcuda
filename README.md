@@ -39,6 +39,7 @@ Installer defaults:
 - tracked branch: `main`
 - Rust bootstrap: enabled (auto-fetches crate dependencies)
 - ferrite-mcp install: enabled (installed via `cargo install --path ... --root ~/.local`)
+- remote access helpers: `~/.local/bin/ferrite-autostart` and `~/.local/bin/ferrite-up`
 
 Re-running the installer updates to the latest `origin/main`, rebuilds, and reinstalls.
 
@@ -50,8 +51,9 @@ Re-running the installer updates to the latest `origin/main`, rebuilds, and rein
 3. hard-resets managed checkouts to tracked branch heads
 4. configures/builds/installs `feRcuda` from managed source
 5. installs `ferrite-mcp` into the same prefix
-6. writes install metadata to `~/.local/share/fer-os/install-meta.txt`
-7. bootstraps Rust deps via `cargo fetch` across runtime crates
+6. installs remote-access helpers for Tailscale plus tmux session boot
+7. writes install metadata to `~/.local/share/fer-os/install-meta.txt`
+8. bootstraps Rust deps via `cargo fetch` across runtime crates
 
 ## Installer Options
 
@@ -83,6 +85,22 @@ bash scripts/install.sh --no-rust-bootstrap
 # Skip ferrite-mcp install (not recommended for full feR-os setup)
 bash scripts/install.sh --no-ferrite-mcp
 ```
+
+## Remote Access
+
+After install, `ferrite-up` will try to bring up Tailscale, then start the
+vendored `ferrite-autostart` watchdog that launches the tmux-backed remote
+session flow.
+
+```bash
+ferrite-up
+tail -f ~/.local/share/ferrite/autostart.log
+cat ~/.local/share/ferrite/remote-session-url.txt
+```
+
+Optional config files:
+- `~/.config/ferrite/env` for `NTFY_TOPIC`, `FERRITE_SESSION`, and timeout knobs
+- `~/.config/ferrite/gmail.conf` for `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `GMAIL_TO`
 
 ## Build / Runtime Notes
 

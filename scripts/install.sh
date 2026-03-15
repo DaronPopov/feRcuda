@@ -376,6 +376,29 @@ build_ferrite_mcp() {
   fi
 }
 
+install_remote_access_tools() {
+  local autostart_src="$ROOT_DIR/scripts/ferrite-autostart"
+  local ferrite_up_src="$ROOT_DIR/scripts/ferrite-up.sh"
+  local autostart_dst="$PREFIX/bin/ferrite-autostart"
+  local ferrite_up_dst="$PREFIX/bin/ferrite-up"
+
+  mkdir -p "$PREFIX/bin"
+
+  if [[ -f "$autostart_src" ]]; then
+    install -m 0755 "$autostart_src" "$autostart_dst"
+    ok "  Remote:     ${autostart_dst}"
+  else
+    warn "Remote autostart script missing at $autostart_src"
+  fi
+
+  if [[ -f "$ferrite_up_src" ]]; then
+    install -m 0755 "$ferrite_up_src" "$ferrite_up_dst"
+    ok "  Remote:     ${ferrite_up_dst}"
+  else
+    warn "ferrite-up helper missing at $ferrite_up_src"
+  fi
+}
+
 # -- Install metadata --------------------------------------------------------
 write_metadata() {
   mkdir -p "$STATE_ROOT"
@@ -415,6 +438,7 @@ main() {
   run_tests
   bootstrap_rust
   build_ferrite_mcp
+  install_remote_access_tools
   write_metadata
 
   echo ""
