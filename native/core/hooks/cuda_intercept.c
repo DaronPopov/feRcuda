@@ -16,7 +16,9 @@
  *   PTX_HOOK_HYBRID_FALLBACK=1     - Allow TLSF alloc to fall back to CUDA (hybrid only)
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
