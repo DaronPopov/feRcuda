@@ -63,6 +63,10 @@ def _get_val(lines: list[str], key: str) -> str:
             return line.split("=", 1)[1].strip()
     return ""
 
+def main_transformer() -> int:
+    """Run transformer inference demo (multi-head attention + FFN on TLSF)."""
+    return _run_benchmark("transformer_demo")
+
 def main_bench_alloc() -> int:
     """Run cudaMalloc vs TLSF alloc/free benchmark (proves TLSF speedup)."""
     libs = _get_libs_dir()
@@ -136,4 +140,6 @@ if __name__ == "__main__":
             sys.exit(main_demo())
         if sys.argv[1] == "bench":
             sys.exit(main_bench_alloc())
+        if sys.argv[1] == "transformer":
+            sys.exit(main_transformer())
     sys.exit(main())

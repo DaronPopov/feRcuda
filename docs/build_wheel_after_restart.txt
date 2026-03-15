@@ -25,6 +25,7 @@ source .venv/bin/activate
 # feRcuda-mega-test-extreme  # compute + allocation stress
 # feRcuda-demo               # Torch+Candle demo with printed tensor values
 # feRcuda-bench-alloc        # cudaMalloc vs TLSF alloc/free (proves TLSF speedup)
+# feRcuda-transformer        # Transformer inference (attention + FFN, latency report)
 
 # 6. Run on GPU node (login nodes have no GPU - use sbatch, not srun --pty)
 # Create run_extreme.sh (avoids 2TB default mem that can cause job failure):

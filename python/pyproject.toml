@@ -17,6 +17,7 @@ feRcuda-mega-test-long = "feRcuda_mega_test.__main__:main_long"
 feRcuda-mega-test-extreme = "feRcuda_mega_test.__main__:main_extreme"
 feRcuda-demo = "feRcuda_mega_test.__main__:main_demo"
 feRcuda-bench-alloc = "feRcuda_mega_test.__main__:main_bench_alloc"
+feRcuda-transformer = "feRcuda_mega_test.__main__:main_transformer"
 
 [tool.setuptools.packages.find]
 where = ["."]

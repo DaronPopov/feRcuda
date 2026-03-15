@@ -56,3 +56,6 @@ name = "mega_stress_long"
 
 [[example]]
 name = "torch_candle_demo"
+
+[[example]]
+name = "transformer_demo"

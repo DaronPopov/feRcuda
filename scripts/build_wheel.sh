@@ -74,7 +74,7 @@ cp build/libptx_core.so build/libptx_kernels.so "$PKG_LIBS/"
 echo "  -> $PKG_LIBS/ $PKG_BIN/"
 
 # 2. Rust benchmarks (aten-ptx needs libtorch from pip)
-echo "[2/4] Building mega_stress_b200 + mega_stress_long + mega_stress_extreme + torch_candle_demo..."
+echo "[2/4] Building mega_stress_b200 + mega_stress_long + mega_stress_extreme + torch_candle_demo + transformer_demo..."
 export FERCUDA_BUILD_DIR="$ROOT/build"
 export LD_LIBRARY_PATH="$ROOT/build:${LD_LIBRARY_PATH:-}"
 export CUDARC_CUDA_VERSION="$TARGET_CUDA"
@@ -96,9 +96,9 @@ if [[ -z "${LIBTORCH:-}" || ! -d "${LIBTORCH}/lib" ]]; then
 fi
 
 cd "$ROOT/rust/deps/ferrite-torch"
-cargo build --example mega_stress_b200 --example mega_stress_long --example mega_stress_extreme --example torch_candle_demo --release --no-default-features --features "${CUDARC_FEATURE},candle-cohab"
+cargo build --example mega_stress_b200 --example mega_stress_long --example mega_stress_extreme --example torch_candle_demo --example transformer_demo --release --no-default-features --features "${CUDARC_FEATURE},candle-cohab"
 
-cp target/release/examples/mega_stress_b200 target/release/examples/mega_stress_long target/release/examples/mega_stress_extreme target/release/examples/torch_candle_demo "$PKG_BIN/"
+cp target/release/examples/mega_stress_b200 target/release/examples/mega_stress_long target/release/examples/mega_stress_extreme target/release/examples/torch_candle_demo target/release/examples/transformer_demo "$PKG_BIN/"
 echo "  -> $PKG_BIN/"
 
 # 3. Build wheel
